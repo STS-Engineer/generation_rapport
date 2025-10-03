@@ -121,12 +121,13 @@ function generatePDF(content) {
           .text(content.conclusion, { align: "justify", lineGap: 3 });
       }
 
-      // Pagination
-      const pages = doc.bufferedPageRange();
-      for (let i = 0; i < pages.count; i++) {
+      // Pagination (ajouter les numéros AVANT de finaliser)
+      const totalPages = doc.bufferedPageRange().count;
+      for (let i = 0; i < totalPages; i++) {
         doc.switchToPage(i);
+        const currentPage = i + 1;
         doc.fontSize(8).fillColor("#9ca3af")
-          .text(`Page ${i + 1}/${pages.count}`, 50, doc.page.height - 50, { align: "center" });
+          .text(`Page ${currentPage}/${totalPages}`, 50, doc.page.height - 50, { align: "center", width: doc.page.width - 100 });
       }
 
       doc.end();
