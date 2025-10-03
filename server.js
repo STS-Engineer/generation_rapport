@@ -8,17 +8,13 @@
 const express = require("express");
 const PDFDocument = require("pdfkit");
 const cors = require("cors");
-const { Client } = require("@microsoft/microsoft-graph-client");
-const { ClientSecretCredential } = require("@azure/identity");
-require("isomorphic-fetch");
 
 const app = express();
 
 /* ========================= CONFIG AZURE AD ========================= */
-// À configurer via variables d'environnement ou Azure App Settings
-const TENANT_ID = process.env.AZURE_TENANT_ID || "YOUR_TENANT_ID";
-const CLIENT_ID = process.env.AZURE_CLIENT_ID || "YOUR_CLIENT_ID";
-const CLIENT_SECRET = process.env.AZURE_CLIENT_SECRET || "YOUR_CLIENT_SECRET";
+const TENANT_ID = process.env.AZURE_TENANT_ID || "4e99b5ff-dd77-418a-8b69-1d684e911168";
+const CLIENT_ID = process.env.AZURE_CLIENT_ID || "6539bda8-d1cb-4f29-ace4-70fb33300148";
+const CLIENT_SECRET = process.env.AZURE_CLIENT_SECRET || "YOV8Q~ZxkYfA0m.lJfiDaRSfu4gVLk4i.KFBsdaD";
 
 /** Identité d'expéditeur */
 const EMAIL_FROM_NAME = "Administration STS";
@@ -41,23 +37,36 @@ app.use((req, _res, next) => {
 });
 
 /* ====================== MICROSOFT GRAPH CLIENT ====================== */
-let graphClient;
+let graphClient = null;
+let graphInitError = null;
 
-try {
-  const credential = new ClientSecretCredential(TENANT_ID, CLIENT_ID, CLIENT_SECRET);
-  
-  graphClient = Client.initWithMiddleware({
-    authProvider: {
-      getAccessToken: async () => {
-        const token = await credential.getToken("https://graph.microsoft.com/.default");
-        return token.token;
+// Initialisation asynchrone du client Graph
+async function initGraphClient() {
+  try {
+    // Import dynamique pour éviter les erreurs au démarrage
+    const { Client } = require("@microsoft/microsoft-graph-client");
+    const { ClientSecretCredential } = require("@azure/identity");
+    require("isomorphic-fetch");
+    
+    const credential = new ClientSecretCredential(TENANT_ID, CLIENT_ID, CLIENT_SECRET);
+    
+    graphClient = Client.initWithMiddleware({
+      authProvider: {
+        getAccessToken: async () => {
+          const token = await credential.getToken("https://graph.microsoft.com/.default");
+          return token.token;
+        }
       }
-    }
-  });
-  
-  console.log("✅ Microsoft Graph client initialisé");
-} catch (err) {
-  console.error("❌ Erreur initialisation Graph:", err.message);
+    });
+    
+    console.log("✅ Microsoft Graph client initialisé");
+    return true;
+  } catch (err) {
+    graphInitError = err.message;
+    console.error("❌ Erreur initialisation Graph:", err.message);
+    console.error("Stack:", err.stack);
+    return false;
+  }
 }
 
 /* ============================ UTILS ============================ */
@@ -153,7 +162,7 @@ function generatePDF(content) {
  */
 async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilename }) {
   if (!graphClient) {
-    throw new Error("Graph client non initialisé");
+    throw new Error(`Graph client non initialisé. Erreur: ${graphInitError || "Inconnue"}`);
   }
 
   const message = {
@@ -179,7 +188,7 @@ async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilena
       attachments: [
         {
           "@odata.type": "#microsoft.graph.fileAttachment",
-          name: pdffilename,
+          name: pdfFilename,
           contentType: "application/pdf",
           contentBytes: pdfBuffer.toString("base64")
         }
@@ -232,6 +241,15 @@ app.post("/api/generate-and-send", async (req, res) => {
       });
     }
 
+    // Vérifier que Graph est initialisé
+    if (!graphClient) {
+      return res.status(503).json({
+        success: false,
+        error: "Service non disponible",
+        details: `Microsoft Graph client non initialisé: ${graphInitError || "Erreur inconnue"}`,
+      });
+    }
+
     // Génération du PDF
     const pdfBuffer = await generatePDF(reportContent);
     const pdfName = `rapport_${reportContent.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf`;
@@ -276,18 +294,26 @@ app.post("/api/generate-and-send", async (req, res) => {
       success: false,
       error: "Erreur lors du traitement",
       details: err.message,
+      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
     });
   }
 });
 
 app.get("/health", (_req, res) => {
   res.json({
-    status: "OK",
+    status: graphClient ? "OK" : "DEGRADED",
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
     smtp_mode: "microsoft_graph_oauth2",
     from: EMAIL_FROM,
-    graph_configured: !!graphClient
+    graph_configured: !!graphClient,
+    graph_error: graphInitError || null,
+    node_version: process.version,
+    env: {
+      tenant_id_set: !!TENANT_ID,
+      client_id_set: !!CLIENT_ID,
+      client_secret_set: !!CLIENT_SECRET,
+    }
   });
 });
 
@@ -299,6 +325,7 @@ app.get("/", (_req, res) => {
       health: "GET /health",
       generateAndSend: "POST /api/generate-and-send",
     },
+    status: graphClient ? "ready" : "initializing",
   });
 });
 
@@ -308,12 +335,18 @@ app.use((req, res) => res.status(404).json({ error: "Route non trouvée", path: 
 // 500
 app.use((err, _req, res, _next) => {
   console.error("Erreur globale:", err);
-  res.status(500).json({ error: "Erreur serveur interne", message: err.message });
+  res.status(500).json({ 
+    error: "Erreur serveur interne", 
+    message: err.message,
+    stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+  });
 });
 
 /* ============================ START ============================ */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+
+// Démarrer le serveur puis initialiser Graph
+app.listen(PORT, async () => {
   console.log(`
 ╔════════════════════════════════════════╗
 ║   🚀 API GPT PDF Email (Graph OAuth2) ║
@@ -321,8 +354,21 @@ app.listen(PORT, () => {
 ║   🌍 Mode: Microsoft Graph API
 ╚════════════════════════════════════════╝
   `);
+  
+  console.log("🔄 Initialisation du client Microsoft Graph...");
+  const success = await initGraphClient();
+  
+  if (success) {
+    console.log("✅ API prête à traiter les requêtes");
+  } else {
+    console.error("⚠️  API démarrée mais Graph client non disponible");
+    console.error("   Vérifiez les dépendances npm et les credentials Azure");
+  }
 });
 
 // Hardening erreurs non capturées
 process.on("unhandledRejection", (r) => console.error("Unhandled Rejection:", r));
-process.on("uncaughtException", (e) => { console.error("Uncaught Exception:", e); process.exit(1); });
+process.on("uncaughtException", (e) => { 
+  console.error("Uncaught Exception:", e); 
+  process.exit(1); 
+});
