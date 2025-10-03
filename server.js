@@ -1,5 +1,5 @@
 /**
- * server.js — API GPT PDF Email (Version Azure stable)
+ * server.js — API GPT PDF Email (BUGFIX switchToPage + SMTP auth)
  * npm i express pdfkit nodemailer cors
  */
 
@@ -25,37 +25,45 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 
-app.use((req, _res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
-  next();
-});
-
 /* ====================== SMTP TRANSPORT ====================== */
 let transporter;
+let smtpError = null;
+
 try {
   const config = {
     host: SMTP_HOST,
     port: SMTP_PORT,
     secure: SMTP_PORT === 465,
-    tls: { minVersion: "TLSv1.2" },
+    tls: { 
+      minVersion: "TLSv1.2",
+      rejectUnauthorized: false // Permet les certificats auto-signés en dev
+    },
   };
 
   if (SMTP_USER && SMTP_PASS) {
     config.auth = { user: SMTP_USER, pass: SMTP_PASS };
-    console.log(`✅ SMTP config: ${SMTP_HOST}:${SMTP_PORT} (avec auth)`);
+    console.log(`✅ SMTP: ${SMTP_HOST}:${SMTP_PORT} (auth: ${SMTP_USER})`);
   } else {
-    console.log(`⚠️  SMTP config: ${SMTP_HOST}:${SMTP_PORT} (SANS auth - relay mode)`);
+    console.log(`⚠️  SMTP: ${SMTP_HOST}:${SMTP_PORT} (SANS auth)`);
+    smtpError = "Identifiants SMTP manquants (SMTP_USER/SMTP_PASS non définis)";
   }
 
   transporter = nodemailer.createTransport(config);
 
-  // Test async sans bloquer le démarrage
+  // Test connexion
   transporter.verify()
-    .then(() => console.log("✅ SMTP connexion OK"))
-    .catch(err => console.error("❌ SMTP erreur:", err.message));
+    .then(() => {
+      console.log("✅ SMTP connexion validée");
+      smtpError = null;
+    })
+    .catch(err => {
+      console.error("❌ SMTP erreur:", err.message);
+      smtpError = err.message;
+    });
 
 } catch (err) {
   console.error("❌ Erreur création transporter:", err.message);
+  smtpError = err.message;
 }
 
 /* ============================ UTILS ============================ */
@@ -69,6 +77,7 @@ function generatePDF(content) {
       const doc = new PDFDocument({
         margin: 50,
         size: "A4",
+        bufferPages: true, // IMPORTANT pour switchToPage
         info: { Title: content.title, Author: "Assistant GPT" },
       });
 
@@ -121,13 +130,18 @@ function generatePDF(content) {
           .text(content.conclusion, { align: "justify", lineGap: 3 });
       }
 
-      // Pagination (ajouter les numéros AVANT de finaliser)
-      const totalPages = doc.bufferedPageRange().count;
-      for (let i = 0; i < totalPages; i++) {
-        doc.switchToPage(i);
-        const currentPage = i + 1;
-        doc.fontSize(8).fillColor("#9ca3af")
-          .text(`Page ${currentPage}/${totalPages}`, 50, doc.page.height - 50, { align: "center", width: doc.page.width - 100 });
+      // PAGINATION CORRIGÉE - Ne pas utiliser switchToPage si une seule page
+      const range = doc.bufferedPageRange();
+      if (range && range.count > 0) {
+        for (let i = 0; i < range.count; i++) {
+          doc.switchToPage(i);
+          doc.fontSize(8).fillColor("#9ca3af").text(
+            `Page ${i + 1}/${range.count}`,
+            50,
+            doc.page.height - 50,
+            { align: "center", width: doc.page.width - 100 }
+          );
+        }
       }
 
       doc.end();
@@ -141,6 +155,10 @@ async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilena
   if (!transporter) {
     throw new Error("SMTP transporter non initialisé");
   }
+  if (smtpError) {
+    throw new Error(`SMTP non disponible: ${smtpError}`);
+  }
+  
   return transporter.sendMail({
     from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM },
     to,
@@ -159,7 +177,8 @@ app.post("/api/generate-and-send", async (req, res) => {
     if (!email || !subject || !reportContent) {
       return res.status(400).json({
         success: false,
-        error: "Paramètres manquants (email, subject, reportContent requis)",
+        error: "Paramètres manquants",
+        required: ["email", "subject", "reportContent"],
       });
     }
 
@@ -171,12 +190,23 @@ app.post("/api/generate-and-send", async (req, res) => {
         !Array.isArray(reportContent.sections) || !reportContent.conclusion) {
       return res.status(400).json({
         success: false,
-        error: "Structure reportContent invalide (title, introduction, sections[], conclusion requis)",
+        error: "Structure reportContent invalide",
+        required: ["title", "introduction", "sections[]", "conclusion"],
+      });
+    }
+
+    // Vérification SMTP avant génération PDF
+    if (smtpError) {
+      return res.status(503).json({
+        success: false,
+        error: "Service SMTP indisponible",
+        details: smtpError,
+        hint: "Vérifiez SMTP_USER et SMTP_PASS dans Azure App Settings",
       });
     }
 
     // Génération PDF
-    console.log(`Génération PDF pour: ${email}`);
+    console.log(`[${new Date().toISOString()}] Génération PDF pour: ${email}`);
     const pdfBuffer = await generatePDF(reportContent);
     const pdfName = `rapport_${Date.now()}.pdf`;
 
@@ -206,32 +236,39 @@ app.post("/api/generate-and-send", async (req, res) => {
       pdfFilename: pdfName,
     });
 
-    console.log(`✅ Rapport envoyé à ${email}`);
+    console.log(`[${new Date().toISOString()}] ✅ Rapport envoyé à ${email}`);
     return res.json({
       success: true,
       message: "Rapport généré et envoyé avec succès",
-      details: { email, pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB` },
+      details: { 
+        email, 
+        pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
+        timestamp: new Date().toISOString(),
+      },
     });
 
   } catch (err) {
-    console.error("❌ Erreur:", err);
+    console.error(`[${new Date().toISOString()}] ❌ Erreur:`, err);
     return res.status(500).json({
       success: false,
       error: "Erreur lors du traitement",
       details: err.message,
+      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
     });
   }
 });
 
 app.get("/health", (_req, res) => {
   res.json({
-    status: "OK",
+    status: smtpError ? "DEGRADED" : "OK",
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
     config: {
       smtp_host: SMTP_HOST,
       smtp_port: SMTP_PORT,
       smtp_auth: !!(SMTP_USER && SMTP_PASS),
+      smtp_user: SMTP_USER ? SMTP_USER.substring(0, 10) + "..." : "non défini",
+      smtp_error: smtpError || null,
       email_from: EMAIL_FROM,
     },
   });
@@ -240,7 +277,7 @@ app.get("/health", (_req, res) => {
 app.get("/", (_req, res) => {
   res.json({
     name: "GPT PDF Email API",
-    version: "1.0.0",
+    version: "1.1.0",
     status: "running",
     endpoints: {
       health: "GET /health",
@@ -266,10 +303,11 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
-║  🚀 API PDF Email - Démarrage OK      ║
+║  🚀 API PDF Email v1.1.0              ║
 ║  📡 Port: ${PORT}                        
 ║  🔧 SMTP: ${SMTP_HOST}:${SMTP_PORT}
 ║  📧 From: ${EMAIL_FROM}
+║  ${smtpError ? '⚠️  SMTP: ' + smtpError.substring(0, 30) : '✅ SMTP: OK'}
 ╚════════════════════════════════════════╝
   `);
 });
