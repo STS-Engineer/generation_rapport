@@ -1,22 +1,6 @@
 /**
- * server.js — API GPT PDF Email (SMTP EOP :25, sans authentification)
+ * server.js — API GPT PDF Email (SMTP compatible Azure)
  * Dépendances :  npm i express pdfkit nodemailer cors
- * Test POST (Postman):
- *   URL:     http://localhost:3000/api/generate-and-send
- *   Headers: Content-Type: application/json
- *   Body: {
- *     "email": "majed.messai@avocarbon.com",
- *     "subject": "Test de rapport GPT",
- *     "reportContent": {
- *       "title": "Rapport hebdo STS",
- *       "introduction": "Résumé des activités de la semaine.",
- *       "sections": [
- *         { "title": "Incidents", "content": "Aucun incident critique." },
- *         { "title": "Projets", "content": "Avancement normal." }
- *       ],
- *       "conclusion": "Actions prévues."
- *     }
- *   }
  */
 
 "use strict";
@@ -28,18 +12,30 @@ const cors = require("cors");
 
 const app = express();
 
-/* ========================= CONFIG FIXE ========================= */
-/** Mode EOP (relay) — pas d'authentification */
-const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
-const SMTP_PORT = 25;
+/* ========================= CONFIG SMTP ========================= */
+/** 
+ * IMPORTANT AZURE : Le port 25 est BLOQUÉ sur Azure App Service.
+ * Solutions :
+ * 1) Utilisez le port 587 avec authentification SMTP
+ * 2) OU configurez un connecteur avec port 25 via Azure VM/Container
+ */
 
-/** Identité d'expéditeur (doit être autorisée par le connector) */
+// Option 1 : SMTP avec authentification (RECOMMANDÉ pour Azure)
+const SMTP_HOST = process.env.SMTP_HOST || "smtp.office365.com";
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || "587", 10);
+const SMTP_USER = process.env.SMTP_USER || "administration.STS@avocarbon.com";
+const SMTP_PASS = process.env.SMTP_PASS || ""; // À DÉFINIR dans Azure App Settings
+
+// Option 2 : EOP relay (nécessite un connecteur O365 ET Azure VM, pas App Service)
+// const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
+// const SMTP_PORT = 25;
+
 const EMAIL_FROM_NAME = "Administration STS";
-const EMAIL_FROM = "administration.STS@avocarbon.com";
+const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
 
 /* ========================= MIDDLEWARES ========================= */
 app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true })); // accepte aussi x-www-form-urlencoded
+app.use(express.urlencoded({ extended: true }));
 app.use(
   cors({
     origin: "*",
@@ -48,35 +44,51 @@ app.use(
   })
 );
 
-// Log simple + type de contenu pour debug
 app.use((req, _res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} | type=${req.get("content-type") || "n/a"}`);
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
 });
 
 /* ====================== TRANSPORTEUR SMTP ====================== */
-/** IMPORTANT : pas d'auth ici. L'IP publique du serveur doit être autorisée dans un connector O365. */
-const transporter = nodemailer.createTransport({
+const transporterConfig = {
   host: SMTP_HOST,
   port: SMTP_PORT,
-  secure: false,
-  tls: { minVersion: "TLSv1.2" },
-});
+  secure: SMTP_PORT === 465, // true pour 465, false pour 587
+  tls: { 
+    minVersion: "TLSv1.2",
+    rejectUnauthorized: process.env.NODE_ENV === "production" // Strict en production
+  },
+};
+
+// Ajout de l'authentification si les credentials sont fournis
+if (SMTP_USER && SMTP_PASS) {
+  transporterConfig.auth = {
+    user: SMTP_USER,
+    pass: SMTP_PASS,
+  };
+  console.log("ℹ️  Mode SMTP : Authentification activée");
+} else {
+  console.log("⚠️  Mode SMTP : Relay sans authentification (vérifiez le connecteur O365)");
+}
+
+const transporter = nodemailer.createTransport(transporterConfig);
 
 // Test transport SMTP au démarrage
 transporter
   .verify()
-  .then(() => console.log("✅ SMTP EOP prêt (port 25, sans auth)"))
-  .catch((err) => console.error("❌ SMTP erreur:", err.message));
+  .then(() => console.log(`✅ SMTP prêt sur ${SMTP_HOST}:${SMTP_PORT}`))
+  .catch((err) => {
+    console.error("❌ SMTP erreur:", err.message);
+    if (SMTP_PORT === 25) {
+      console.error("⚠️  Le port 25 est bloqué sur Azure App Service. Utilisez le port 587 avec authentification.");
+    }
+  });
 
 /* ============================ UTILS ============================ */
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-/**
- * Génère un PDF (Buffer) depuis {title, introduction, sections:[{title,content}], conclusion}
- */
 function generatePDF(content) {
   return new Promise((resolve, reject) => {
     try {
@@ -157,12 +169,9 @@ function generatePDF(content) {
   });
 }
 
-/**
- * Envoie un email avec le PDF en pièce jointe (via EOP port 25)
- */
 async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilename }) {
   return transporter.sendMail({
-    from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM }, // doit être autorisé par le connector
+    from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM },
     to,
     subject,
     html: messageHtml,
@@ -182,16 +191,6 @@ app.post("/api/generate-and-send", async (req, res) => {
         success: false,
         error: "Données manquantes",
         details: "Envoyez un JSON avec email, subject, reportContent",
-        example: {
-          email: "majed.messai@avocarbon.com",
-          subject: "Test",
-          reportContent: {
-            title: "Titre",
-            introduction: "Intro",
-            sections: [{ title: "S1", content: "C1" }],
-            conclusion: "Fin",
-          },
-        },
       });
     }
     if (!isValidEmail(email)) {
@@ -242,7 +241,7 @@ app.post("/api/generate-and-send", async (req, res) => {
 
     return res.json({
       success: true,
-      message: "Rapport généré et envoyé avec succès (EOP relay, sans auth)",
+      message: "Rapport généré et envoyé avec succès",
       details: {
         email,
         pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
@@ -265,14 +264,14 @@ app.get("/health", (_req, res) => {
     uptime: process.uptime(),
     smtp_host: SMTP_HOST,
     smtp_port: SMTP_PORT,
-    mode: "EOP (relay sans auth)",
+    smtp_auth: !!(SMTP_USER && SMTP_PASS),
     from: EMAIL_FROM,
   });
 });
 
 app.get("/", (_req, res) => {
   res.json({
-    name: "GPT PDF Email API (EOP :25, sans auth)",
+    name: "GPT PDF Email API",
     version: "1.0.0",
     endpoints: {
       health: "GET /health",
@@ -281,10 +280,8 @@ app.get("/", (_req, res) => {
   });
 });
 
-// 404
 app.use((req, res) => res.status(404).json({ error: "Route non trouvée", path: req.path }));
 
-// 500
 app.use((err, _req, res, _next) => {
   console.error("Erreur globale:", err);
   res.status(500).json({ error: "Erreur serveur interne", message: err.message });
@@ -296,12 +293,11 @@ app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
 ║   🚀 API GPT PDF Email                ║
-║   📡 Port: ${PORT}                          
-║   🔧 SMTP Mode: ${SMTP_MODE}                         
+║   📡 Port: ${PORT}                        
+║   🔧 SMTP: ${SMTP_HOST}:${SMTP_PORT}      
 ╚════════════════════════════════════════╝
   `);
 });
 
-// Hardening erreurs non capturées
 process.on("unhandledRejection", (r) => console.error("Unhandled Rejection:", r));
 process.on("uncaughtException", (e) => { console.error("Uncaught Exception:", e); process.exit(1); });
