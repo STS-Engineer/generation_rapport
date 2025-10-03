@@ -1,45 +1,32 @@
 /**
- * server.js — API GPT PDF Email (SMTP EOP :25, sans authentification)
- * Dépendances :  npm i express pdfkit nodemailer cors
- * Test POST (Postman):
- *   URL:     http://localhost:3000/api/generate-and-send
- *   Headers: Content-Type: application/json
- *   Body: {
- *     "email": "majed.messai@avocarbon.com",
- *     "subject": "Test de rapport GPT",
- *     "reportContent": {
- *       "title": "Rapport hebdo STS",
- *       "introduction": "Résumé des activités de la semaine.",
- *       "sections": [
- *         { "title": "Incidents", "content": "Aucun incident critique." },
- *         { "title": "Projets", "content": "Avancement normal." }
- *       ],
- *       "conclusion": "Actions prévues."
- *     }
- *   }
+ * server.js — API GPT PDF Email avec OAuth2 Microsoft Graph
+ * Dépendances : npm i express pdfkit @microsoft/microsoft-graph-client @azure/identity isomorphic-fetch cors
  */
 
 "use strict";
 
 const express = require("express");
 const PDFDocument = require("pdfkit");
-const nodemailer = require("nodemailer");
 const cors = require("cors");
+const { Client } = require("@microsoft/microsoft-graph-client");
+const { ClientSecretCredential } = require("@azure/identity");
+require("isomorphic-fetch");
 
 const app = express();
 
-/* ========================= CONFIG FIXE ========================= */
-/** Mode EOP (relay) — pas d'authentification */
-const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
-const SMTP_PORT = 25;
+/* ========================= CONFIG AZURE AD ========================= */
+// À configurer via variables d'environnement ou Azure App Settings
+const TENANT_ID = process.env.AZURE_TENANT_ID || "YOUR_TENANT_ID";
+const CLIENT_ID = process.env.AZURE_CLIENT_ID || "YOUR_CLIENT_ID";
+const CLIENT_SECRET = process.env.AZURE_CLIENT_SECRET || "YOUR_CLIENT_SECRET";
 
-/** Identité d'expéditeur (doit être autorisée par le connector) */
+/** Identité d'expéditeur */
 const EMAIL_FROM_NAME = "Administration STS";
 const EMAIL_FROM = "administration.STS@avocarbon.com";
 
 /* ========================= MIDDLEWARES ========================= */
 app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true })); // accepte aussi x-www-form-urlencoded
+app.use(express.urlencoded({ extended: true }));
 app.use(
   cors({
     origin: "*",
@@ -48,26 +35,30 @@ app.use(
   })
 );
 
-// Log simple + type de contenu pour debug
 app.use((req, _res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} | type=${req.get("content-type") || "n/a"}`);
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
 });
 
-/* ====================== TRANSPORTEUR SMTP ====================== */
-/** IMPORTANT : pas d'auth ici. L'IP publique du serveur doit être autorisée dans un connector O365. */
-const transporter = nodemailer.createTransport({
-  host: SMTP_HOST,
-  port: SMTP_PORT,
-  secure: false,
-  tls: { minVersion: "TLSv1.2" },
-});
+/* ====================== MICROSOFT GRAPH CLIENT ====================== */
+let graphClient;
 
-// Test transport SMTP au démarrage
-transporter
-  .verify()
-  .then(() => console.log("✅ SMTP EOP prêt (port 25, sans auth)"))
-  .catch((err) => console.error("❌ SMTP erreur:", err.message));
+try {
+  const credential = new ClientSecretCredential(TENANT_ID, CLIENT_ID, CLIENT_SECRET);
+  
+  graphClient = Client.initWithMiddleware({
+    authProvider: {
+      getAccessToken: async () => {
+        const token = await credential.getToken("https://graph.microsoft.com/.default");
+        return token.token;
+      }
+    }
+  });
+  
+  console.log("✅ Microsoft Graph client initialisé");
+} catch (err) {
+  console.error("❌ Erreur initialisation Graph:", err.message);
+}
 
 /* ============================ UTILS ============================ */
 function isValidEmail(email) {
@@ -158,18 +149,49 @@ function generatePDF(content) {
 }
 
 /**
- * Envoie un email avec le PDF en pièce jointe (via EOP port 25)
+ * Envoie un email avec le PDF en pièce jointe via Microsoft Graph API
  */
 async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilename }) {
-  return transporter.sendMail({
-    from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM }, // doit être autorisé par le connector
-    to,
-    subject,
-    html: messageHtml,
-    attachments: [
-      { filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" },
-    ],
-  });
+  if (!graphClient) {
+    throw new Error("Graph client non initialisé");
+  }
+
+  const message = {
+    message: {
+      subject: subject,
+      body: {
+        contentType: "HTML",
+        content: messageHtml
+      },
+      toRecipients: [
+        {
+          emailAddress: {
+            address: to
+          }
+        }
+      ],
+      from: {
+        emailAddress: {
+          name: EMAIL_FROM_NAME,
+          address: EMAIL_FROM
+        }
+      },
+      attachments: [
+        {
+          "@odata.type": "#microsoft.graph.fileAttachment",
+          name: pdffilename,
+          contentType: "application/pdf",
+          contentBytes: pdfBuffer.toString("base64")
+        }
+      ]
+    },
+    saveToSentItems: true
+  };
+
+  // Envoi via Graph API
+  await graphClient
+    .api(`/users/${EMAIL_FROM}/sendMail`)
+    .post(message);
 }
 
 /* ============================ ROUTES ============================ */
@@ -242,7 +264,7 @@ app.post("/api/generate-and-send", async (req, res) => {
 
     return res.json({
       success: true,
-      message: "Rapport généré et envoyé avec succès (EOP relay, sans auth)",
+      message: "Rapport généré et envoyé avec succès via Microsoft Graph",
       details: {
         email,
         pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
@@ -263,17 +285,16 @@ app.get("/health", (_req, res) => {
     status: "OK",
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    smtp_host: SMTP_HOST,
-    smtp_port: SMTP_PORT,
-    mode: "EOP (relay sans auth)",
+    smtp_mode: "microsoft_graph_oauth2",
     from: EMAIL_FROM,
+    graph_configured: !!graphClient
   });
 });
 
 app.get("/", (_req, res) => {
   res.json({
-    name: "GPT PDF Email API (EOP :25, sans auth)",
-    version: "1.0.0",
+    name: "GPT PDF Email API (Microsoft Graph OAuth2)",
+    version: "2.0.0",
     endpoints: {
       health: "GET /health",
       generateAndSend: "POST /api/generate-and-send",
@@ -291,13 +312,13 @@ app.use((err, _req, res, _next) => {
 });
 
 /* ============================ START ============================ */
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
-║   🚀 API GPT PDF Email (EOP :25)      ║
+║   🚀 API GPT PDF Email (Graph OAuth2) ║
 ║   📡 Port: ${PORT}
-║   🌍 Mode: EOP relay (sans auth)
+║   🌍 Mode: Microsoft Graph API
 ╚════════════════════════════════════════╝
   `);
 });
