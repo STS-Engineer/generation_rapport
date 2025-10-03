@@ -1,6 +1,22 @@
 /**
- * server.js — API GPT PDF Email (Azure-friendly)
- * Dépendances: npm i express pdfkit nodemailer cors
+ * server.js — API GPT PDF Email (SMTP EOP :25, sans authentification)
+ * Dépendances :  npm i express pdfkit nodemailer cors
+ * Test POST (Postman):
+ *   URL:     http://localhost:3000/api/generate-and-send
+ *   Headers: Content-Type: application/json
+ *   Body: {
+ *     "email": "majed.messai@avocarbon.com",
+ *     "subject": "Test de rapport GPT",
+ *     "reportContent": {
+ *       "title": "Rapport hebdo STS",
+ *       "introduction": "Résumé des activités de la semaine.",
+ *       "sections": [
+ *         { "title": "Incidents", "content": "Aucun incident critique." },
+ *         { "title": "Projets", "content": "Avancement normal." }
+ *       ],
+ *       "conclusion": "Actions prévues."
+ *     }
+ *   }
  */
 
 "use strict";
@@ -12,58 +28,54 @@ const cors = require("cors");
 
 const app = express();
 
-/* ======================= CONFIG ======================= */
-/** SMTP : Office 365 submission (587 + AUTH) — recommandé sur Azure */
+/* ========================= CONFIG FIXE ========================= */
+/** Mode EOP (relay) — pas d'authentification */
+const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
+const SMTP_PORT = 25;
+
+/** Identité d'expéditeur (doit être autorisée par le connector) */
 const EMAIL_FROM_NAME = "Administration STS";
 const EMAIL_FROM = "administration.STS@avocarbon.com";
-const EMAIL_USER = "administration.STS@avocarbon.com";
 
-/** ⚠️ Mettez le mot de passe ici OU, mieux, dans App Settings Azure (EMAIL_PASSWORD) */
-const EMAIL_PASSWORD = process.env.EMAIL_PASSWORD || "APP_PASSWORD_OU_MDP_ICI";
-
-const O365_HOST = "smtp.office365.com";
-const O365_PORT = 587;
-
-/* ===================== MIDDLEWARES ===================== */
+/* ========================= MIDDLEWARES ========================= */
 app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true })); // accepte aussi x-www-form-urlencoded
 app.use(
   cors({
     origin: "*",
     methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-API-KEY"]
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+
+// Log simple + type de contenu pour debug
 app.use((req, _res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} | ct=${req.get("content-type") || "n/a"}`);
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} | type=${req.get("content-type") || "n/a"}`);
   next();
 });
 
-/* ================== SMTP TRANSPORTER =================== */
-if (!EMAIL_USER || !EMAIL_PASSWORD) {
-  console.warn("⚠️ EMAIL_USER/EMAIL_PASSWORD manquants. Définissez EMAIL_PASSWORD dans Azure App Settings si possible.");
-}
-
+/* ====================== TRANSPORTEUR SMTP ====================== */
+/** IMPORTANT : pas d'auth ici. L'IP publique du serveur doit être autorisée dans un connector O365. */
 const transporter = nodemailer.createTransport({
-  host: O365_HOST,
-  port: O365_PORT,
-  secure: false, // STARTTLS
-  auth: { user: EMAIL_USER, pass: EMAIL_PASSWORD },
-  tls: { minVersion: "TLSv1.2" }
+  host: SMTP_HOST,
+  port: SMTP_PORT,
+  secure: false,
+  tls: { minVersion: "TLSv1.2" },
 });
 
-transporter.verify()
-  .then(() => console.log("✅ SMTP 587 prêt (Office 365 submission)"))
-  .catch(err => console.error("❌ SMTP erreur:", err && err.message));
+// Test transport SMTP au démarrage
+transporter
+  .verify()
+  .then(() => console.log("✅ SMTP EOP prêt (port 25, sans auth)"))
+  .catch((err) => console.error("❌ SMTP erreur:", err.message));
 
-/* ======================== UTILS ======================== */
+/* ============================ UTILS ============================ */
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
 /**
  * Génère un PDF (Buffer) depuis {title, introduction, sections:[{title,content}], conclusion}
- * Fix: bufferPages:true + boucle paginations sécurisée
  */
 function generatePDF(content) {
   return new Promise((resolve, reject) => {
@@ -71,8 +83,7 @@ function generatePDF(content) {
       const doc = new PDFDocument({
         margin: 50,
         size: "A4",
-        bufferPages: true, // <-- important pour switchToPage
-        info: { Title: content.title, Author: "Assistant GPT", Subject: content.title }
+        info: { Title: content.title, Author: "Assistant GPT", Subject: content.title },
       });
 
       const chunks = [];
@@ -87,8 +98,14 @@ function generatePDF(content) {
       doc.moveDown();
 
       // Date
-      doc.fontSize(10).fillColor("#6b7280").font("Helvetica")
-        .text(`Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`, { align: "right" });
+      doc
+        .fontSize(10)
+        .fillColor("#6b7280")
+        .font("Helvetica")
+        .text(
+          `Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`,
+          { align: "right" }
+        );
       doc.moveDown(2);
 
       // Introduction
@@ -121,17 +138,16 @@ function generatePDF(content) {
           .text(content.conclusion, { align: "justify", lineGap: 3 });
       }
 
-      // Pagination (sécurisée)
-      try {
-        const pages = doc.bufferedPageRange();
-        const count = pages && typeof pages.count === "number" ? pages.count : 0;
-        for (let i = 0; i < count; i++) {
-          doc.switchToPage(i);
-          doc.fontSize(8).fillColor("#9ca3af")
-            .text(`Page ${i + 1} sur ${count}`, 50, doc.page.height - 50, { align: "center" });
-        }
-      } catch (e) {
-        console.warn("⚠️ Pagination non appliquée:", e && e.message);
+      // Pagination
+      const pages = doc.bufferedPageRange();
+      for (let i = 0; i < pages.count; i++) {
+        doc.switchToPage(i);
+        doc.fontSize(8).fillColor("#9ca3af").text(
+          `Page ${i + 1} sur ${pages.count}`,
+          50,
+          doc.page.height - 50,
+          { align: "center" }
+        );
       }
 
       doc.end();
@@ -142,31 +158,44 @@ function generatePDF(content) {
 }
 
 /**
- * Envoi email avec PDF
+ * Envoie un email avec le PDF en pièce jointe (via EOP port 25)
  */
 async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilename }) {
   return transporter.sendMail({
-    from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM },
+    from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM }, // doit être autorisé par le connector
     to,
     subject,
     html: messageHtml,
-    attachments: [{ filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" }]
+    attachments: [
+      { filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" },
+    ],
   });
 }
 
-/* ========================= ROUTES ========================= */
+/* ============================ ROUTES ============================ */
 app.post("/api/generate-and-send", async (req, res) => {
   try {
-    const body = req.body || {};
-    let email = (body.email || "").toString().trim().replace(/\s+/g, "");
-    const subject = (body.subject || "").toString().trim();
-    const reportContent = body.reportContent;
+    const { email, subject, reportContent } = req.body || {};
 
     if (!email || !subject || !reportContent) {
-      return res.status(400).json({ success: false, error: "Données manquantes", details: "email, subject, reportContent requis" });
+      return res.status(400).json({
+        success: false,
+        error: "Données manquantes",
+        details: "Envoyez un JSON avec email, subject, reportContent",
+        example: {
+          email: "majed.messai@avocarbon.com",
+          subject: "Test",
+          reportContent: {
+            title: "Titre",
+            introduction: "Intro",
+            sections: [{ title: "S1", content: "C1" }],
+            conclusion: "Fin",
+          },
+        },
+      });
     }
     if (!isValidEmail(email)) {
-      return res.status(400).json({ success: false, error: "Email invalide", details: `Adresse reçue: "${email}"` });
+      return res.status(400).json({ success: false, error: "Email invalide" });
     }
     if (
       !reportContent.title ||
@@ -177,13 +206,15 @@ app.post("/api/generate-and-send", async (req, res) => {
       return res.status(400).json({
         success: false,
         error: "Structure du rapport invalide",
-        details: "title, introduction, sections (array), conclusion requis"
+        details: "title, introduction, sections (array), conclusion sont requis",
       });
     }
 
+    // Génération du PDF
     const pdfBuffer = await generatePDF(reportContent);
     const pdfName = `rapport_${reportContent.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf`;
 
+    // Corps HTML du mail
     const html = `
       <!DOCTYPE html>
       <html>
@@ -200,16 +231,30 @@ app.post("/api/generate-and-send", async (req, res) => {
       </html>
     `;
 
-    await sendEmailWithPdf({ to: email, subject, messageHtml: html, pdfBuffer, pdfFilename: pdfName });
+    // Envoi
+    await sendEmailWithPdf({
+      to: email,
+      subject: `Rapport : ${reportContent.title}`,
+      messageHtml: html,
+      pdfBuffer,
+      pdfFilename: pdfName,
+    });
 
     return res.json({
       success: true,
-      message: "Rapport généré et envoyé avec succès (Office365:587)",
-      details: { email, pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB` }
+      message: "Rapport généré et envoyé avec succès (EOP relay, sans auth)",
+      details: {
+        email,
+        pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
+      },
     });
   } catch (err) {
     console.error("❌ Erreur:", err);
-    return res.status(500).json({ success: false, error: "Erreur lors du traitement", details: err.message });
+    return res.status(500).json({
+      success: false,
+      error: "Erreur lors du traitement",
+      details: err.message,
+    });
   }
 });
 
@@ -218,19 +263,21 @@ app.get("/health", (_req, res) => {
     status: "OK",
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    smtp_mode: "office365",
-    smtp_host: O365_HOST,
-    smtp_port: O365_PORT,
-    from: EMAIL_FROM
+    smtp_host: SMTP_HOST,
+    smtp_port: SMTP_PORT,
+    mode: "EOP (relay sans auth)",
+    from: EMAIL_FROM,
   });
 });
 
 app.get("/", (_req, res) => {
   res.json({
-    name: "GPT PDF Email API",
+    name: "GPT PDF Email API (EOP :25, sans auth)",
     version: "1.0.0",
-    endpoints: { health: "GET /health", generateAndSend: "POST /api/generate-and-send" },
-    smtp_mode: "office365"
+    endpoints: {
+      health: "GET /health",
+      generateAndSend: "POST /api/generate-and-send",
+    },
   });
 });
 
@@ -243,17 +290,18 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: "Erreur serveur interne", message: err.message });
 });
 
-/* ========================= START ========================= */
-const PORT = process.env.PORT || 3000; // <-- essentiel sur Azure
+/* ============================ START ============================ */
+const PORT = 3000;
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
-║   🚀 API GPT PDF Email (Azure)        ║
+║   🚀 API GPT PDF Email (EOP :25)      ║
 ║   📡 Port: ${PORT}
-║   🔐 SMTP: Office365 (587 + AUTH)
+║   🌍 Mode: EOP relay (sans auth)
 ╚════════════════════════════════════════╝
   `);
 });
 
+// Hardening erreurs non capturées
 process.on("unhandledRejection", (r) => console.error("Unhandled Rejection:", r));
 process.on("uncaughtException", (e) => { console.error("Uncaught Exception:", e); process.exit(1); });
