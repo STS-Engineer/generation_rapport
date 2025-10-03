@@ -1,6 +1,22 @@
 /**
- * server.js — API GPT PDF Email
- * Dépendances : npm i express pdfkit nodemailer cors
+ * server.js — API GPT PDF Email (SMTP EOP :25, sans authentification)
+ * Dépendances :  npm i express pdfkit nodemailer cors
+ * Test POST (Postman):
+ *   URL:     http://localhost:3000/api/generate-and-send
+ *   Headers: Content-Type: application/json
+ *   Body: {
+ *     "email": "majed.messai@avocarbon.com",
+ *     "subject": "Test de rapport GPT",
+ *     "reportContent": {
+ *       "title": "Rapport hebdo STS",
+ *       "introduction": "Résumé des activités de la semaine.",
+ *       "sections": [
+ *         { "title": "Incidents", "content": "Aucun incident critique." },
+ *         { "title": "Projets", "content": "Avancement normal." }
+ *       ],
+ *       "conclusion": "Actions prévues."
+ *     }
+ *   }
  */
 
 "use strict";
@@ -12,77 +28,54 @@ const cors = require("cors");
 
 const app = express();
 
-/* ======================= CONFIG ======================= */
-/** Choisis le mode SMTP : "eop" (relay 25 sans auth) | "office365" (587 avec login) */
-const SMTP_MODE = "office365"; // <- mets "eop" si tu as un connector + IP autorisée
+/* ========================= CONFIG FIXE ========================= */
+/** Mode EOP (relay) — pas d'authentification */
+const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
+const SMTP_PORT = 25;
 
-/** Identité d’expéditeur */
+/** Identité d'expéditeur (doit être autorisée par le connector) */
 const EMAIL_FROM_NAME = "Administration STS";
 const EMAIL_FROM = "administration.STS@avocarbon.com";
 
-/** Si SMTP_MODE = "office365" (587 + auth) */
-const EMAIL_USER = "administration.STS@avocarbon.com";
-const EMAIL_PASSWORD = "APP_PASSWORD_OU_MDP_ICI"; // <-- mets le vrai mot de passe/app password
-
-/** Hôtes/Ports */
-const EOP_HOST = "avocarbon-com.mail.protection.outlook.com";
-const EOP_PORT = 25;
-
-const O365_HOST = "smtp.office365.com";
-const O365_PORT = 587;
-
-/* ===================== MIDDLEWARES ===================== */
+/* ========================= MIDDLEWARES ========================= */
 app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true })); // accepte aussi x-www-form-urlencoded
 app.use(
   cors({
     origin: "*",
     methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-API-KEY"]
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+
+// Log simple + type de contenu pour debug
 app.use((req, _res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path} | type=${req.get("content-type") || "n/a"}`);
   next();
 });
 
-/* ================ SMTP TRANSPORTER ================= */
-function createTransporter() {
-  if (SMTP_MODE === "eop") {
-    // EOP relay (25, no auth) — requiert un connector O365 et IP publique autorisée
-    return nodemailer.createTransport({
-      host: EOP_HOST,
-      port: EOP_PORT,
-      secure: false,
-      tls: { minVersion: "TLSv1.2" }
-    });
-  }
-  // Office 365 submission (587 + auth, STARTTLS)
-  if (!EMAIL_USER || !EMAIL_PASSWORD) {
-    throw new Error("Identifiants manquants: définis EMAIL_USER et EMAIL_PASSWORD en haut du fichier.");
-  }
-  return nodemailer.createTransport({
-    host: O365_HOST,
-    port: O365_PORT,
-    secure: false, // STARTTLS
-    auth: { user: EMAIL_USER, pass: EMAIL_PASSWORD },
-    tls: { minVersion: "TLSv1.2" }
-  });
-}
+/* ====================== TRANSPORTEUR SMTP ====================== */
+/** IMPORTANT : pas d'auth ici. L'IP publique du serveur doit être autorisée dans un connector O365. */
+const transporter = nodemailer.createTransport({
+  host: SMTP_HOST,
+  port: SMTP_PORT,
+  secure: false,
+  tls: { minVersion: "TLSv1.2" },
+});
 
-const transporter = createTransporter();
+// Test transport SMTP au démarrage
 transporter
   .verify()
-  .then(() => console.log(`✅ SMTP prêt (mode: ${SMTP_MODE})`))
+  .then(() => console.log("✅ SMTP EOP prêt (port 25, sans auth)"))
   .catch((err) => console.error("❌ SMTP erreur:", err.message));
 
-/* ======================== UTILS ======================== */
+/* ============================ UTILS ============================ */
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
 /**
- * Génère un PDF (Buffer) à partir d'un objet reportContent
+ * Génère un PDF (Buffer) depuis {title, introduction, sections:[{title,content}], conclusion}
  */
 function generatePDF(content) {
   return new Promise((resolve, reject) => {
@@ -90,7 +83,7 @@ function generatePDF(content) {
       const doc = new PDFDocument({
         margin: 50,
         size: "A4",
-        info: { Title: content.title, Author: "Assistant GPT", Subject: content.title }
+        info: { Title: content.title, Author: "Assistant GPT", Subject: content.title },
       });
 
       const chunks = [];
@@ -105,8 +98,14 @@ function generatePDF(content) {
       doc.moveDown();
 
       // Date
-      doc.fontSize(10).fillColor("#6b7280").font("Helvetica")
-        .text(`Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`, { align: "right" });
+      doc
+        .fontSize(10)
+        .fillColor("#6b7280")
+        .font("Helvetica")
+        .text(
+          `Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`,
+          { align: "right" }
+        );
       doc.moveDown(2);
 
       // Introduction
@@ -143,8 +142,12 @@ function generatePDF(content) {
       const pages = doc.bufferedPageRange();
       for (let i = 0; i < pages.count; i++) {
         doc.switchToPage(i);
-        doc.fontSize(8).fillColor("#9ca3af")
-          .text(`Page ${i + 1} sur ${pages.count}`, 50, doc.page.height - 50, { align: "center" });
+        doc.fontSize(8).fillColor("#9ca3af").text(
+          `Page ${i + 1} sur ${pages.count}`,
+          50,
+          doc.page.height - 50,
+          { align: "center" }
+        );
       }
 
       doc.end();
@@ -155,48 +158,45 @@ function generatePDF(content) {
 }
 
 /**
- * Envoi email avec PDF
+ * Envoie un email avec le PDF en pièce jointe (via EOP port 25)
  */
 async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilename }) {
   return transporter.sendMail({
-    from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM },
+    from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM }, // doit être autorisé par le connector
     to,
     subject,
     html: messageHtml,
     attachments: [
-      { filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" }
-    ]
+      { filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" },
+    ],
   });
 }
 
-/* ========================= ROUTES ========================= */
+/* ============================ ROUTES ============================ */
 app.post("/api/generate-and-send", async (req, res) => {
   try {
-    // Debug utile pour les Actions
-    // console.log("[DEBUG] Headers:", req.headers);
-    // console.log("[DEBUG] Raw body:", req.body);
-
-    const body = req.body || {};
-    let email = (body.email || "").toString().trim().replace(/\s+/g, ""); // supprime espaces/retours
-    const subject = (body.subject || "").toString().trim();
-    const reportContent = body.reportContent;
+    const { email, subject, reportContent } = req.body || {};
 
     if (!email || !subject || !reportContent) {
       return res.status(400).json({
         success: false,
         error: "Données manquantes",
-        details: "Envoyez un JSON avec email, subject, reportContent"
+        details: "Envoyez un JSON avec email, subject, reportContent",
+        example: {
+          email: "majed.messai@avocarbon.com",
+          subject: "Test",
+          reportContent: {
+            title: "Titre",
+            introduction: "Intro",
+            sections: [{ title: "S1", content: "C1" }],
+            conclusion: "Fin",
+          },
+        },
       });
     }
-
     if (!isValidEmail(email)) {
-      return res.status(400).json({
-        success: false,
-        error: "Email invalide",
-        details: `Adresse reçue: "${email}"`
-      });
+      return res.status(400).json({ success: false, error: "Email invalide" });
     }
-
     if (
       !reportContent.title ||
       !reportContent.introduction ||
@@ -206,7 +206,7 @@ app.post("/api/generate-and-send", async (req, res) => {
       return res.status(400).json({
         success: false,
         error: "Structure du rapport invalide",
-        details: "title, introduction, sections (array), conclusion requis"
+        details: "title, introduction, sections (array), conclusion sont requis",
       });
     }
 
@@ -214,7 +214,7 @@ app.post("/api/generate-and-send", async (req, res) => {
     const pdfBuffer = await generatePDF(reportContent);
     const pdfName = `rapport_${reportContent.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf`;
 
-    // Corps HTML email
+    // Corps HTML du mail
     const html = `
       <!DOCTYPE html>
       <html>
@@ -231,28 +231,29 @@ app.post("/api/generate-and-send", async (req, res) => {
       </html>
     `;
 
+    // Envoi
     await sendEmailWithPdf({
       to: email,
-      subject,
+      subject: `Rapport : ${reportContent.title}`,
       messageHtml: html,
       pdfBuffer,
-      pdfFilename: pdfName
+      pdfFilename: pdfName,
     });
 
     return res.json({
       success: true,
-      message: `Rapport généré et envoyé avec succès (${SMTP_MODE.toUpperCase()})`,
+      message: "Rapport généré et envoyé avec succès (EOP relay, sans auth)",
       details: {
         email,
-        pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`
-      }
+        pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
+      },
     });
   } catch (err) {
     console.error("❌ Erreur:", err);
     return res.status(500).json({
       success: false,
       error: "Erreur lors du traitement",
-      details: err.message
+      details: err.message,
     });
   }
 });
@@ -262,22 +263,21 @@ app.get("/health", (_req, res) => {
     status: "OK",
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    smtp_mode: SMTP_MODE,
-    smtp_host: SMTP_MODE === "eop" ? EOP_HOST : O365_HOST,
-    smtp_port: SMTP_MODE === "eop" ? EOP_PORT : O365_PORT,
-    from: EMAIL_FROM
+    smtp_host: SMTP_HOST,
+    smtp_port: SMTP_PORT,
+    mode: "EOP (relay sans auth)",
+    from: EMAIL_FROM,
   });
 });
 
 app.get("/", (_req, res) => {
   res.json({
-    name: "GPT PDF Email API",
+    name: "GPT PDF Email API (EOP :25, sans auth)",
     version: "1.0.0",
     endpoints: {
       health: "GET /health",
-      generateAndSend: "POST /api/generate-and-send"
+      generateAndSend: "POST /api/generate-and-send",
     },
-    smtp_mode: SMTP_MODE
   });
 });
 
@@ -290,14 +290,14 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: "Erreur serveur interne", message: err.message });
 });
 
-/* ========================= START ========================= */
+/* ============================ START ============================ */
 const PORT = 3000;
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
-║   🚀 API GPT PDF Email                ║
-║   📡 Port: ${PORT}                          
-║   🔧 SMTP Mode: ${SMTP_MODE}                         
+║   🚀 API GPT PDF Email (EOP :25)      ║
+║   📡 Port: ${PORT}
+║   🌍 Mode: EOP relay (sans auth)
 ╚════════════════════════════════════════╝
   `);
 });
