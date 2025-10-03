@@ -1,6 +1,6 @@
 /**
- * server.js — API GPT PDF Email (SMTP compatible Azure)
- * Dépendances :  npm i express pdfkit nodemailer cors
+ * server.js — API GPT PDF Email (Version Azure stable)
+ * npm i express pdfkit nodemailer cors
  */
 
 "use strict";
@@ -12,77 +12,51 @@ const cors = require("cors");
 
 const app = express();
 
-/* ========================= CONFIG SMTP ========================= */
-/** 
- * IMPORTANT AZURE : Le port 25 est BLOQUÉ sur Azure App Service.
- * Solutions :
- * 1) Utilisez le port 587 avec authentification SMTP
- * 2) OU configurez un connecteur avec port 25 via Azure VM/Container
- */
-
-// Option 1 : SMTP avec authentification (RECOMMANDÉ pour Azure)
+/* ========================= CONFIG ========================= */
 const SMTP_HOST = process.env.SMTP_HOST || "smtp.office365.com";
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || "587", 10);
-const SMTP_USER = process.env.SMTP_USER || "administration.STS@avocarbon.com";
-const SMTP_PASS = process.env.SMTP_PASS || ""; // À DÉFINIR dans Azure App Settings
-
-// Option 2 : EOP relay (nécessite un connecteur O365 ET Azure VM, pas App Service)
-// const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
-// const SMTP_PORT = 25;
-
-const EMAIL_FROM_NAME = "Administration STS";
+const SMTP_USER = process.env.SMTP_USER || "";
+const SMTP_PASS = process.env.SMTP_PASS || "";
 const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
+const EMAIL_FROM_NAME = "Administration STS";
 
 /* ========================= MIDDLEWARES ========================= */
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+app.use(cors());
 
 app.use((req, _res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
   next();
 });
 
-/* ====================== TRANSPORTEUR SMTP ====================== */
-const transporterConfig = {
-  host: SMTP_HOST,
-  port: SMTP_PORT,
-  secure: SMTP_PORT === 465, // true pour 465, false pour 587
-  tls: { 
-    minVersion: "TLSv1.2",
-    rejectUnauthorized: process.env.NODE_ENV === "production" // Strict en production
-  },
-};
-
-// Ajout de l'authentification si les credentials sont fournis
-if (SMTP_USER && SMTP_PASS) {
-  transporterConfig.auth = {
-    user: SMTP_USER,
-    pass: SMTP_PASS,
+/* ====================== SMTP TRANSPORT ====================== */
+let transporter;
+try {
+  const config = {
+    host: SMTP_HOST,
+    port: SMTP_PORT,
+    secure: SMTP_PORT === 465,
+    tls: { minVersion: "TLSv1.2" },
   };
-  console.log("ℹ️  Mode SMTP : Authentification activée");
-} else {
-  console.log("⚠️  Mode SMTP : Relay sans authentification (vérifiez le connecteur O365)");
+
+  if (SMTP_USER && SMTP_PASS) {
+    config.auth = { user: SMTP_USER, pass: SMTP_PASS };
+    console.log(`✅ SMTP config: ${SMTP_HOST}:${SMTP_PORT} (avec auth)`);
+  } else {
+    console.log(`⚠️  SMTP config: ${SMTP_HOST}:${SMTP_PORT} (SANS auth - relay mode)`);
+  }
+
+  transporter = nodemailer.createTransport(config);
+
+  // Test async sans bloquer le démarrage
+  transporter.verify()
+    .then(() => console.log("✅ SMTP connexion OK"))
+    .catch(err => console.error("❌ SMTP erreur:", err.message));
+
+} catch (err) {
+  console.error("❌ Erreur création transporter:", err.message);
 }
-
-const transporter = nodemailer.createTransport(transporterConfig);
-
-// Test transport SMTP au démarrage
-transporter
-  .verify()
-  .then(() => console.log(`✅ SMTP prêt sur ${SMTP_HOST}:${SMTP_PORT}`))
-  .catch((err) => {
-    console.error("❌ SMTP erreur:", err.message);
-    if (SMTP_PORT === 25) {
-      console.error("⚠️  Le port 25 est bloqué sur Azure App Service. Utilisez le port 587 avec authentification.");
-    }
-  });
 
 /* ============================ UTILS ============================ */
 function isValidEmail(email) {
@@ -95,7 +69,7 @@ function generatePDF(content) {
       const doc = new PDFDocument({
         margin: 50,
         size: "A4",
-        info: { Title: content.title, Author: "Assistant GPT", Subject: content.title },
+        info: { Title: content.title, Author: "Assistant GPT" },
       });
 
       const chunks = [];
@@ -104,25 +78,21 @@ function generatePDF(content) {
       doc.on("error", reject);
 
       // En-tête
-      doc.fontSize(26).font("Helvetica-Bold").fillColor("#1e40af").text(content.title, { align: "center" });
+      doc.fontSize(24).font("Helvetica-Bold").fillColor("#1e40af")
+        .text(content.title, { align: "center" });
       doc.moveDown(0.5);
-      doc.strokeColor("#3b82f6").lineWidth(2).moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
-      doc.moveDown();
+      doc.strokeColor("#3b82f6").lineWidth(2)
+        .moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+      doc.moveDown(2);
 
       // Date
-      doc
-        .fontSize(10)
-        .fillColor("#6b7280")
-        .font("Helvetica")
-        .text(
-          `Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`,
-          { align: "right" }
-        );
+      doc.fontSize(10).fillColor("#6b7280").font("Helvetica")
+        .text(`Date: ${new Date().toLocaleDateString("fr-FR")}`, { align: "right" });
       doc.moveDown(2);
 
       // Introduction
       if (content.introduction) {
-        doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Introduction");
+        doc.fontSize(14).font("Helvetica-Bold").fillColor("#1f2937").text("Introduction");
         doc.moveDown(0.5);
         doc.fontSize(11).font("Helvetica").fillColor("#374151")
           .text(content.introduction, { align: "justify", lineGap: 3 });
@@ -131,9 +101,10 @@ function generatePDF(content) {
 
       // Sections
       if (Array.isArray(content.sections)) {
-        content.sections.forEach((section, index) => {
+        content.sections.forEach((section, i) => {
           if (doc.y > 650) doc.addPage();
-          doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(`${index + 1}. ${section.title}`);
+          doc.fontSize(13).font("Helvetica-Bold").fillColor("#1e40af")
+            .text(`${i + 1}. ${section.title}`);
           doc.moveDown(0.5);
           doc.fontSize(11).font("Helvetica").fillColor("#374151")
             .text(section.content, { align: "justify", lineGap: 3 });
@@ -144,7 +115,7 @@ function generatePDF(content) {
       // Conclusion
       if (content.conclusion) {
         if (doc.y > 650) doc.addPage();
-        doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Conclusion");
+        doc.fontSize(14).font("Helvetica-Bold").fillColor("#1f2937").text("Conclusion");
         doc.moveDown(0.5);
         doc.fontSize(11).font("Helvetica").fillColor("#374151")
           .text(content.conclusion, { align: "justify", lineGap: 3 });
@@ -154,12 +125,8 @@ function generatePDF(content) {
       const pages = doc.bufferedPageRange();
       for (let i = 0; i < pages.count; i++) {
         doc.switchToPage(i);
-        doc.fontSize(8).fillColor("#9ca3af").text(
-          `Page ${i + 1} sur ${pages.count}`,
-          50,
-          doc.page.height - 50,
-          { align: "center" }
-        );
+        doc.fontSize(8).fillColor("#9ca3af")
+          .text(`Page ${i + 1}/${pages.count}`, 50, doc.page.height - 50, { align: "center" });
       }
 
       doc.end();
@@ -170,14 +137,15 @@ function generatePDF(content) {
 }
 
 async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilename }) {
+  if (!transporter) {
+    throw new Error("SMTP transporter non initialisé");
+  }
   return transporter.sendMail({
     from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM },
     to,
     subject,
     html: messageHtml,
-    attachments: [
-      { filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" },
-    ],
+    attachments: [{ filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" }],
   });
 }
 
@@ -186,45 +154,43 @@ app.post("/api/generate-and-send", async (req, res) => {
   try {
     const { email, subject, reportContent } = req.body || {};
 
+    // Validation
     if (!email || !subject || !reportContent) {
       return res.status(400).json({
         success: false,
-        error: "Données manquantes",
-        details: "Envoyez un JSON avec email, subject, reportContent",
+        error: "Paramètres manquants (email, subject, reportContent requis)",
       });
     }
+
     if (!isValidEmail(email)) {
       return res.status(400).json({ success: false, error: "Email invalide" });
     }
-    if (
-      !reportContent.title ||
-      !reportContent.introduction ||
-      !Array.isArray(reportContent.sections) ||
-      !reportContent.conclusion
-    ) {
+
+    if (!reportContent.title || !reportContent.introduction || 
+        !Array.isArray(reportContent.sections) || !reportContent.conclusion) {
       return res.status(400).json({
         success: false,
-        error: "Structure du rapport invalide",
-        details: "title, introduction, sections (array), conclusion sont requis",
+        error: "Structure reportContent invalide (title, introduction, sections[], conclusion requis)",
       });
     }
 
-    // Génération du PDF
+    // Génération PDF
+    console.log(`Génération PDF pour: ${email}`);
     const pdfBuffer = await generatePDF(reportContent);
-    const pdfName = `rapport_${reportContent.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf`;
+    const pdfName = `rapport_${Date.now()}.pdf`;
 
-    // Corps HTML du mail
+    // Email HTML
     const html = `
       <!DOCTYPE html>
       <html>
         <body style="font-family: Arial, sans-serif; line-height:1.6; color:#111827;">
-          <h2 style="margin:0 0 8px 0;">📄 Votre rapport est prêt</h2>
-          <div style="background:#e0e7ff;padding:12px;border-left:4px solid #667eea;border-radius:6px;margin:12px 0;">
-            <strong>📊 Sujet :</strong> ${subject}<br>
-            <strong>📌 Titre :</strong> ${reportContent.title}<br>
-            <strong>📅 Date :</strong> ${new Date().toLocaleDateString("fr-FR")}
+          <h2>📄 Votre rapport est prêt</h2>
+          <div style="background:#e0e7ff;padding:12px;border-left:4px solid #667eea;margin:12px 0;">
+            <strong>Sujet :</strong> ${subject}<br>
+            <strong>Titre :</strong> ${reportContent.title}<br>
+            <strong>Date :</strong> ${new Date().toLocaleDateString("fr-FR")}
           </div>
-          <p>Vous trouverez le rapport complet en pièce jointe au format PDF.</p>
+          <p>Vous trouverez le rapport complet en pièce jointe.</p>
           <p style="color:#6b7280;font-size:12px">© ${new Date().getFullYear()} ${EMAIL_FROM_NAME}</p>
         </body>
       </html>
@@ -239,14 +205,13 @@ app.post("/api/generate-and-send", async (req, res) => {
       pdfFilename: pdfName,
     });
 
+    console.log(`✅ Rapport envoyé à ${email}`);
     return res.json({
       success: true,
       message: "Rapport généré et envoyé avec succès",
-      details: {
-        email,
-        pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
-      },
+      details: { email, pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB` },
     });
+
   } catch (err) {
     console.error("❌ Erreur:", err);
     return res.status(500).json({
@@ -261,11 +226,13 @@ app.get("/health", (_req, res) => {
   res.json({
     status: "OK",
     timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    smtp_host: SMTP_HOST,
-    smtp_port: SMTP_PORT,
-    smtp_auth: !!(SMTP_USER && SMTP_PASS),
-    from: EMAIL_FROM,
+    uptime: Math.floor(process.uptime()),
+    config: {
+      smtp_host: SMTP_HOST,
+      smtp_port: SMTP_PORT,
+      smtp_auth: !!(SMTP_USER && SMTP_PASS),
+      email_from: EMAIL_FROM,
+    },
   });
 });
 
@@ -273,31 +240,45 @@ app.get("/", (_req, res) => {
   res.json({
     name: "GPT PDF Email API",
     version: "1.0.0",
+    status: "running",
     endpoints: {
       health: "GET /health",
-      generateAndSend: "POST /api/generate-and-send",
+      generate: "POST /api/generate-and-send",
     },
   });
 });
 
-app.use((req, res) => res.status(404).json({ error: "Route non trouvée", path: req.path }));
+// 404
+app.use((req, res) => {
+  res.status(404).json({ error: "Route non trouvée", path: req.path });
+});
 
+// Error handler
 app.use((err, _req, res, _next) => {
   console.error("Erreur globale:", err);
-  res.status(500).json({ error: "Erreur serveur interne", message: err.message });
+  res.status(500).json({ error: "Erreur serveur", message: err.message });
 });
 
 /* ============================ START ============================ */
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
+
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
-║   🚀 API GPT PDF Email                ║
-║   📡 Port: ${PORT}                        
-║   🔧 SMTP: ${SMTP_HOST}:${SMTP_PORT}      
+║  🚀 API PDF Email - Démarrage OK      ║
+║  📡 Port: ${PORT}                        
+║  🔧 SMTP: ${SMTP_HOST}:${SMTP_PORT}
+║  📧 From: ${EMAIL_FROM}
 ╚════════════════════════════════════════╝
   `);
 });
 
-process.on("unhandledRejection", (r) => console.error("Unhandled Rejection:", r));
-process.on("uncaughtException", (e) => { console.error("Uncaught Exception:", e); process.exit(1); });
+// Gestion des erreurs non capturées
+process.on("unhandledRejection", (reason) => {
+  console.error("⚠️  Unhandled Rejection:", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("❌ Uncaught Exception:", error);
+  process.exit(1);
+});
