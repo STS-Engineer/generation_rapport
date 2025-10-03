@@ -291,13 +291,13 @@ app.use((err, _req, res, _next) => {
 });
 
 /* ============================ START ============================ */
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`
 ╔════════════════════════════════════════╗
-║   🚀 API GPT PDF Email (EOP :25)      ║
-║   📡 Port: ${PORT}
-║   🌍 Mode: EOP relay (sans auth)
+║   🚀 API GPT PDF Email                ║
+║   📡 Port: ${PORT}                          
+║   🔧 SMTP Mode: ${SMTP_MODE}                         
 ╚════════════════════════════════════════╝
   `);
 });
