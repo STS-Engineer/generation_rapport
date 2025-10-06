@@ -14,12 +14,13 @@ const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
 // SMTP Office 365 recommandé (STARTTLS 587)
 const SMTP_HOST = process.env.SMTP_HOST || "smtp.office365.com";
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
-const SMTP_USER = process.env.M365_USER || EMAIL_FROM;
+const SMTP_USER = process.env.M365_USER || EMAIL_FROM;                 // Doit être autorisé pour "Send As"
 const SMTP_PASS = process.env.M365_PASSWORD || process.env.M365_APP_PASSWORD;
 
 /* ========================= MIDDLEWARES ========================= */
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
+
 app.use(
   cors({
     origin: true,
@@ -41,7 +42,7 @@ app.use((req, res, next) => {
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
-  secure: false,
+  secure: false,          // STARTTLS
   requireTLS: true,
   auth: SMTP_USER && SMTP_PASS ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
   tls: { minVersion: "TLSv1.2" },
@@ -79,7 +80,7 @@ function looksLikePngOrJpeg(buf) {
 function drawTable(doc, { caption, headers = [], rows = [] }, opts = {}) {
   const startX = opts.x || 50;
   let y = opts.y || doc.y;
-  const pageW = doc.page.width - 100;
+  const pageW = doc.page.width - 100; // 50 de marge chaque côté
   const colCount = Math.max(headers.length, ...(rows.map((r) => r.length)), 1);
   const colW = pageW / colCount;
   const rowH = 20;
@@ -92,10 +93,8 @@ function drawTable(doc, { caption, headers = [], rows = [] }, opts = {}) {
   if (headers.length) {
     doc.rect(startX, y, pageW, rowH).fill("#e5e7eb").stroke("#d1d5db");
     headers.forEach((h, i) => {
-      doc.fillColor("#111827").font("Helvetica-Bold").fontSize(10).text(String(h), startX + i * colW + 6, y + 6, {
-        width: colW - 12,
-        ellipsis: true,
-      });
+      doc.fillColor("#111827").font("Helvetica-Bold").fontSize(10)
+        .text(String(h), startX + i * colW + 6, y + 6, { width: colW - 12, ellipsis: true });
     });
     y += rowH;
   }
@@ -107,10 +106,8 @@ function drawTable(doc, { caption, headers = [], rows = [] }, opts = {}) {
     }
     doc.rect(startX, y, pageW, rowH).stroke("#e5e7eb");
     row.forEach((cell, i) => {
-      doc.fillColor("#374151").font("Helvetica").fontSize(10).text(String(cell ?? ""), startX + i * colW + 6, y + 6, {
-        width: colW - 12,
-        ellipsis: true,
-      });
+      doc.fillColor("#374151").font("Helvetica").fontSize(10)
+        .text(String(cell ?? ""), startX + i * colW + 6, y + 6, { width: colW - 12, ellipsis: true });
     });
     y += rowH;
   });
@@ -150,10 +147,12 @@ function safeAddImage(doc, { caption, imageBase64 }, opts = {}) {
   }
 }
 
+/* ======================== PDF GENERATION ======================== */
 function generatePDF(content) {
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({
+        bufferPages: true, // ✅ indispensable pour switchToPage
         margin: 50,
         size: "A4",
         info: { Title: content.title, Author: "Assistant GPT", Subject: content.title },
@@ -233,13 +232,16 @@ function generatePDF(content) {
         });
       }
 
-      // Pagination
-      const pages = doc.bufferedPageRange();
-      for (let i = 0; i < pages.count; i++) {
-        doc.switchToPage(i);
-        doc.fontSize(8).fillColor("#9ca3af").text(`Page ${i + 1} sur ${pages.count}`, 50, doc.page.height - 50, {
-          align: "center",
-        });
+      // Pagination (avec garde-fou)
+      const pages = doc.bufferedPageRange(); // { start, count }
+      if (pages && typeof pages.count === "number" && pages.count > 0) {
+        for (let i = 0; i < pages.count; i++) {
+          doc.switchToPage(i);
+          doc
+            .fontSize(8)
+            .fillColor("#9ca3af")
+            .text(`Page ${i + 1} sur ${pages.count}`, 50, doc.page.height - 50, { align: "center" });
+        }
       }
 
       doc.end();
@@ -258,7 +260,7 @@ async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilena
       html: messageHtml,
       attachments: [{ filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" }],
     },
-    { timeout: 15000 }
+    { timeout: 15000 } // évite timeouts proxy
   );
 }
 
@@ -268,9 +270,11 @@ app.post("/api/generate-and-send", async (req, res) => {
     const { email, subject, reportContent } = req.body || {};
 
     if (!email || !subject || !reportContent) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Données manquantes", details: "Envoyez email, subject, reportContent" });
+      return res.status(400).json({
+        success: false,
+        error: "Données manquantes",
+        details: "Envoyez email, subject, reportContent",
+      });
     }
     if (!isValidEmail(email)) {
       return res.status(400).json({ success: false, error: "Email invalide" });
@@ -290,17 +294,13 @@ app.post("/api/generate-and-send", async (req, res) => {
     if (rc.graph?.imageBase64) {
       const gb = b64ToBufferMaybe(rc.graph.imageBase64);
       if (!looksLikePngOrJpeg(gb)) {
-        return res
-          .status(400)
-          .json({ success: false, error: "Graph invalide : imageBase64 doit être PNG ou JPEG valide" });
+        return res.status(400).json({ success: false, error: "Graph invalide : imageBase64 doit être PNG ou JPEG valide" });
       }
     }
     if (rc.photo?.imageBase64) {
       const pb = b64ToBufferMaybe(rc.photo.imageBase64);
       if (!looksLikePngOrJpeg(pb)) {
-        return res
-          .status(400)
-          .json({ success: false, error: "Photo invalide : imageBase64 doit être PNG ou JPEG valide" });
+        return res.status(400).json({ success: false, error: "Photo invalide : imageBase64 doit être PNG ou JPEG valide" });
       }
     }
 
@@ -362,7 +362,7 @@ app.get("/health", (_req, res) => {
 app.get("/", (_req, res) => {
   res.json({
     name: "GPT PDF Email API",
-    version: "1.1.1",
+    version: "1.1.2",
     status: "running",
     endpoints: {
       health: "GET /health",
