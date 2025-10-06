@@ -11,10 +11,9 @@ const app = express();
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "Administration STS";
 const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
 
-// SMTP Office 365 (recommandé sur Azure App Service)
 const SMTP_HOST = process.env.SMTP_HOST || "smtp.office365.com";
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
-const SMTP_USER = process.env.M365_USER || EMAIL_FROM; // doit être autorisé à envoyer
+const SMTP_USER = process.env.M365_USER || EMAIL_FROM; // compte autorisé à envoyer
 const SMTP_PASS = process.env.M365_PASSWORD || process.env.M365_APP_PASSWORD;
 
 /* ========================= MIDDLEWARES ========================= */
@@ -31,21 +30,21 @@ app.use(
 );
 app.options("*", cors());
 
-// Forcer JSON + log
+// Forcer JSON + logs simples
 app.use((req, res, next) => {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
 });
 
-/* ====================== TRANSPORTEUR SMTP ====================== */
+/* ====================== SMTP TRANSPORT ====================== */
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
-  secure: false,            // STARTTLS
+  secure: false, // STARTTLS
   requireTLS: true,
   auth: SMTP_USER && SMTP_PASS ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
-  tls: { minVersion: "TLSv1.2" },
+  tls: { minVersion: "TLSv1.2" }
 });
 
 transporter
@@ -148,10 +147,10 @@ function generatePDF(content) {
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({
-        // pas besoin de bufferPages ici (on ne fait pas switchToPage)
+        // pas de bufferPages: on ne fait pas switchToPage
         margin: 50,
         size: "A4",
-        info: { Title: content.title, Author: "Assistant GPT", Subject: content.title },
+        info: { Title: content.title, Author: "Assistant GPT", Subject: content.title }
       });
 
       const chunks = [];
@@ -159,7 +158,7 @@ function generatePDF(content) {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
-      // Pagination “Page X” (sans total) sur chaque page
+      // Footer “Page X” (sans total) par page
       let pageIndex = 0;
       function writeFooter() {
         const page = doc.page;
@@ -167,23 +166,21 @@ function generatePDF(content) {
            .text(`Page ${pageIndex + 1}`, 50, page.height - 50, { align: "center" });
         pageIndex++;
       }
-      // footer pour la 1re page
       writeFooter();
-      // footer pour chaque nouvelle page
       doc.on("pageAdded", writeFooter);
 
-      // ======== Titre
+      // Titre
       doc.fontSize(26).font("Helvetica-Bold").fillColor("#1e40af").text(content.title, { align: "center" });
       doc.moveDown(0.5);
       doc.strokeColor("#3b82f6").lineWidth(2).moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
       doc.moveDown();
 
-      // ======== Date
+      // Date
       doc.fontSize(10).fillColor("#6b7280").font("Helvetica")
-         .text(`Date: ${new Date().toLocaleDateString("fr-FR", { year:"numeric", month:"long", day:"numeric" })}`, { align: "right" });
+         .text(`Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`, { align: "right" });
       doc.moveDown(2);
 
-      // ======== Introduction
+      // Introduction
       if (content.introduction) {
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Introduction");
         doc.moveDown(0.5);
@@ -192,7 +189,7 @@ function generatePDF(content) {
         doc.moveDown(2);
       }
 
-      // ======== Sections
+      // Sections
       if (Array.isArray(content.sections)) {
         content.sections.forEach((section, index) => {
           if (doc.y > 650) doc.addPage();
@@ -204,24 +201,24 @@ function generatePDF(content) {
         });
       }
 
-      // ======== Tableau (optionnel)
+      // Tableau
       if (content.table && Array.isArray(content.table.rows) && content.table.rows.length) {
         if (doc.y > 650) doc.addPage();
         drawTable(doc, content.table, { x: 50, y: doc.y });
         doc.moveDown(1.5);
       }
 
-      // ======== Graphe (optionnel)
+      // Graphe
       if (content.graph?.imageBase64) {
         safeAddImage(doc, { caption: content.graph.caption || "Graphe", imageBase64: content.graph.imageBase64 }, { label: "graph", maxH: 280 });
       }
 
-      // ======== Photo (optionnel)
+      // Photo
       if (content.photo?.imageBase64) {
         safeAddImage(doc, { caption: content.photo.caption || "Photo", imageBase64: content.photo.imageBase64 }, { label: "photo", maxH: 320 });
       }
 
-      // ======== Conclusion
+      // Conclusion
       if (content.conclusion) {
         if (doc.y > 650) doc.addPage();
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Conclusion");
@@ -244,9 +241,9 @@ async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilena
       to,
       subject,
       html: messageHtml,
-      attachments: [{ filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" }],
+      attachments: [{ filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" }]
     },
-    { timeout: 15000 } // évite timeouts proxy
+    { timeout: 15000 }
   );
 }
 
@@ -256,11 +253,7 @@ app.post("/api/generate-and-send", async (req, res) => {
     const { email, subject, reportContent } = req.body || {};
 
     if (!email || !subject || !reportContent) {
-      return res.status(400).json({
-        success: false,
-        error: "Données manquantes",
-        details: "Envoyez email, subject, reportContent",
-      });
+      return res.status(400).json({ success: false, error: "Données manquantes", details: "Envoyez email, subject, reportContent" });
     }
     if (!isValidEmail(email)) {
       return res.status(400).json({ success: false, error: "Email invalide" });
@@ -271,7 +264,6 @@ app.post("/api/generate-and-send", async (req, res) => {
       return res.status(400).json({ success: false, error: "Structure du rapport invalide" });
     }
 
-    // Validations optionnelles
     if (rc.table) {
       if (!Array.isArray(rc.table.headers) || !Array.isArray(rc.table.rows)) {
         return res.status(400).json({ success: false, error: "Tableau invalide : headers/rows requis" });
@@ -314,35 +306,24 @@ app.post("/api/generate-and-send", async (req, res) => {
       subject: `Rapport : ${reportContent.title}`,
       messageHtml: html,
       pdfBuffer,
-      pdfFilename: pdfName,
+      pdfFilename: pdfName
     });
 
     return res.json({
       success: true,
       message: "Rapport généré et envoyé avec succès",
-      details: { email, pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB` },
+      details: { email, pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB` }
     });
   } catch (err) {
     console.error("❌ Erreur:", err);
-    return res.status(500).json({
-      success: false,
-      error: "Erreur lors du traitement",
-      details: err && err.message,
-    });
+    return res.status(500).json({ success: false, error: "Erreur lors du traitement", details: err && err.message });
   }
 });
 
-app.post("/api/echo", (req, res) => {
-  return res.status(200).json({ ok: true, got: req.body || {} });
-});
+app.post("/api/echo", (req, res) => res.status(200).json({ ok: true, got: req.body || {} }));
 
 app.get("/health", (_req, res) => {
-  res.json({
-    status: "OK",
-    timestamp: new Date().toISOString(),
-    uptime: Math.floor(process.uptime()),
-    service: "PDF Report API",
-  });
+  res.json({ status: "OK", timestamp: new Date().toISOString(), uptime: Math.floor(process.uptime()), service: "PDF Report API" });
 });
 
 app.get("/", (_req, res) => {
@@ -350,11 +331,7 @@ app.get("/", (_req, res) => {
     name: "GPT PDF Email API",
     version: "1.2.0",
     status: "running",
-    endpoints: {
-      health: "GET /health",
-      echo: "POST /api/echo",
-      generateAndSend: "POST /api/generate-and-send",
-    },
+    endpoints: { health: "GET /health", echo: "POST /api/echo", generateAndSend: "POST /api/generate-and-send" }
   });
 });
 
@@ -367,9 +344,7 @@ app.use((err, _req, res, _next) => {
 
 /* ============================ START ============================ */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 API démarrée sur port ${PORT}`);
-});
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 API démarrée sur port ${PORT}`));
 
 process.on("unhandledRejection", (r) => console.error("Unhandled Rejection:", r));
 process.on("uncaughtException", (e) => { console.error("Uncaught Exception:", e); process.exit(1); });
