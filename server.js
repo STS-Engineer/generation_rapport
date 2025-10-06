@@ -7,17 +7,21 @@ const cors = require("cors");
 
 const app = express();
 
-/* ========================= CONFIG FIXE ========================= */
-const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
-const SMTP_PORT = 25;
-const EMAIL_FROM_NAME = "Administration STS";
-const EMAIL_FROM = "administration.STS@avocarbon.com";
+/* ========================= CONFIG ========================= */
+const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "Administration STS";
+const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
+
+// SMTP Office 365 (recommandé sur Azure App Service)
+const SMTP_HOST = process.env.SMTP_HOST || "smtp.office365.com";
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_USER = process.env.M365_USER || EMAIL_FROM;
+const SMTP_PASS = process.env.M365_PASSWORD || process.env.M365_APP_PASSWORD;
 
 /* ========================= MIDDLEWARES ========================= */
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// CORS plus permissif pour ChatGPT
+// CORS (facultatif pour Actions, utile en debug)
 app.use(
   cors({
     origin: true,
@@ -26,11 +30,11 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization", "openai-conversation-id", "openai-ephemeral-user-id"],
   })
 );
-
-// Préflight pour toutes les routes
 app.options("*", cors());
 
-app.use((req, _res, next) => {
+// Forcer JSON sur nos endpoints (évite certains proxies HTML)
+app.use((req, res, next) => {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
 });
@@ -39,18 +43,73 @@ app.use((req, _res, next) => {
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
-  secure: false,
+  secure: false,              // STARTTLS
+  requireTLS: true,
+  auth: SMTP_USER && SMTP_PASS ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
   tls: { minVersion: "TLSv1.2" },
 });
-
 transporter
   .verify()
-  .then(() => console.log("✅ SMTP EOP prêt"))
-  .catch((err) => console.error("❌ SMTP erreur:", err.message));
+  .then(() => console.log("✅ SMTP prêt:", SMTP_HOST, SMTP_PORT))
+  .catch((err) => console.error("❌ SMTP erreur:", err && err.message));
 
 /* ============================ UTILS ============================ */
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function b64ToBufferMaybe(data) {
+  if (!data) return null;
+  const commaIdx = data.indexOf(",");
+  const b64 = data.startsWith("data:") ? data.slice(commaIdx + 1) : data;
+  try {
+    return Buffer.from(b64, "base64");
+  } catch {
+    return null;
+  }
+}
+
+function drawTable(doc, { caption, headers = [], rows = [] }, opts = {}) {
+  const startX = opts.x || 50;
+  let y = opts.y || doc.y;
+  const pageW = doc.page.width - 100; // marges 50
+  const colCount = Math.max(headers.length, ...(rows.map((r) => r.length)), 1);
+  const colW = pageW / colCount;
+  const rowH = 20;
+
+  if (caption) {
+    doc.fontSize(13).font("Helvetica-Bold").fillColor("#1f2937").text(caption, startX, y);
+    y += 18;
+  }
+
+  if (headers.length) {
+    doc.rect(startX, y, pageW, rowH).fill("#e5e7eb").stroke("#d1d5db");
+    headers.forEach((h, i) => {
+      doc.fillColor("#111827").font("Helvetica-Bold").fontSize(10).text(String(h), startX + i * colW + 6, y + 6, {
+        width: colW - 12,
+        ellipsis: true,
+      });
+    });
+    y += rowH;
+  }
+
+  rows.forEach((row) => {
+    if (y + rowH > doc.page.height - 80) {
+      doc.addPage();
+      y = 50;
+    }
+    doc.rect(startX, y, pageW, rowH).stroke("#e5e7eb");
+    row.forEach((cell, i) => {
+      doc.fillColor("#374151").font("Helvetica").fontSize(10).text(String(cell ?? ""), startX + i * colW + 6, y + 6, {
+        width: colW - 12,
+        ellipsis: true,
+      });
+    });
+    y += rowH;
+  });
+
+  doc.moveDown();
+  return y;
 }
 
 function generatePDF(content) {
@@ -67,57 +126,105 @@ function generatePDF(content) {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
+      // Titre
       doc.fontSize(26).font("Helvetica-Bold").fillColor("#1e40af").text(content.title, { align: "center" });
       doc.moveDown(0.5);
       doc.strokeColor("#3b82f6").lineWidth(2).moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
       doc.moveDown();
 
+      // Date
       doc
         .fontSize(10)
         .fillColor("#6b7280")
         .font("Helvetica")
-        .text(
-          `Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`,
-          { align: "right" }
-        );
+        .text(`Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`, {
+          align: "right",
+        });
       doc.moveDown(2);
 
+      // Introduction
       if (content.introduction) {
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Introduction");
         doc.moveDown(0.5);
-        doc.fontSize(11).font("Helvetica").fillColor("#374151")
-          .text(content.introduction, { align: "justify", lineGap: 3 });
+        doc.fontSize(11).font("Helvetica").fillColor("#374151").text(content.introduction, {
+          align: "justify",
+          lineGap: 3,
+        });
         doc.moveDown(2);
       }
 
+      // Sections
       if (Array.isArray(content.sections)) {
         content.sections.forEach((section, index) => {
           if (doc.y > 650) doc.addPage();
           doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(`${index + 1}. ${section.title}`);
           doc.moveDown(0.5);
-          doc.fontSize(11).font("Helvetica").fillColor("#374151")
-            .text(section.content, { align: "justify", lineGap: 3 });
+          doc.fontSize(11).font("Helvetica").fillColor("#374151").text(section.content, {
+            align: "justify",
+            lineGap: 3,
+          });
           doc.moveDown(1.5);
         });
       }
 
+      // Tableau (optionnel)
+      if (content.table && Array.isArray(content.table.rows) && content.table.rows.length) {
+        if (doc.y > 650) doc.addPage();
+        drawTable(doc, content.table, { x: 50, y: doc.y });
+        doc.moveDown(1.5);
+      }
+
+      // Graphe (optionnel)
+      if (content.graph && content.graph.imageBase64) {
+        const buf = b64ToBufferMaybe(content.graph.imageBase64);
+        if (buf) {
+          if (doc.y > 600) doc.addPage();
+          doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(content.graph.caption || "Graphe", {
+            align: "left",
+          });
+          doc.moveDown(0.5);
+          const maxW = doc.page.width - 100;
+          const maxH = 280;
+          doc.image(buf, { fit: [maxW, maxH], align: "center" });
+          doc.moveDown(1.5);
+        }
+      }
+
+      // Photo (optionnel)
+      if (content.photo && content.photo.imageBase64) {
+        const buf = b64ToBufferMaybe(content.photo.imageBase64);
+        if (buf) {
+          if (doc.y > 600) doc.addPage();
+          doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(content.photo.caption || "Photo", {
+            align: "left",
+          });
+          doc.moveDown(0.5);
+          const maxW = doc.page.width - 100;
+          const maxH = 320;
+          doc.image(buf, { fit: [maxW, maxH], align: "center" });
+          doc.moveDown(1.5);
+        }
+      }
+
+      // Conclusion
       if (content.conclusion) {
         if (doc.y > 650) doc.addPage();
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Conclusion");
         doc.moveDown(0.5);
-        doc.fontSize(11).font("Helvetica").fillColor("#374151")
-          .text(content.conclusion, { align: "justify", lineGap: 3 });
+        doc.fontSize(11).font("Helvetica").fillColor("#374151").text(content.conclusion, {
+          align: "justify",
+          lineGap: 3,
+        });
       }
 
+      // Pied de page (pagination)
       const pages = doc.bufferedPageRange();
       for (let i = 0; i < pages.count; i++) {
         doc.switchToPage(i);
-        doc.fontSize(8).fillColor("#9ca3af").text(
-          `Page ${i + 1} sur ${pages.count}`,
-          50,
-          doc.page.height - 50,
-          { align: "center" }
-        );
+        doc
+          .fontSize(8)
+          .fillColor("#9ca3af")
+          .text(`Page ${i + 1} sur ${pages.count}`, 50, doc.page.height - 50, { align: "center" });
       }
 
       doc.end();
@@ -128,15 +235,16 @@ function generatePDF(content) {
 }
 
 async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilename }) {
-  return transporter.sendMail({
-    from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM },
-    to,
-    subject,
-    html: messageHtml,
-    attachments: [
-      { filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" },
-    ],
-  });
+  return transporter.sendMail(
+    {
+      from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM },
+      to,
+      subject,
+      html: messageHtml,
+      attachments: [{ filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" }],
+    },
+    { timeout: 15000 } // évite timeouts proxy
+  );
 }
 
 /* ============================ ROUTES ============================ */
@@ -145,25 +253,30 @@ app.post("/api/generate-and-send", async (req, res) => {
     const { email, subject, reportContent } = req.body || {};
 
     if (!email || !subject || !reportContent) {
-      return res.status(400).json({
-        success: false,
-        error: "Données manquantes",
-        details: "Envoyez email, subject, reportContent",
-      });
+      return res
+        .status(400)
+        .json({ success: false, error: "Données manquantes", details: "Envoyez email, subject, reportContent" });
     }
     if (!isValidEmail(email)) {
       return res.status(400).json({ success: false, error: "Email invalide" });
     }
-    if (
-      !reportContent.title ||
-      !reportContent.introduction ||
-      !Array.isArray(reportContent.sections) ||
-      !reportContent.conclusion
-    ) {
-      return res.status(400).json({
-        success: false,
-        error: "Structure du rapport invalide",
-      });
+
+    const rc = reportContent;
+    if (!rc.title || !rc.introduction || !Array.isArray(rc.sections) || !rc.conclusion) {
+      return res.status(400).json({ success: false, error: "Structure du rapport invalide" });
+    }
+
+    // Validations optionnels
+    if (rc.table) {
+      if (!Array.isArray(rc.table.headers) || !Array.isArray(rc.table.rows)) {
+        return res.status(400).json({ success: false, error: "Tableau invalide : headers/rows requis" });
+      }
+    }
+    if (rc.graph?.imageBase64 && !b64ToBufferMaybe(rc.graph.imageBase64)) {
+      return res.status(400).json({ success: false, error: "Graph invalide : imageBase64 non décodable" });
+    }
+    if (rc.photo?.imageBase64 && !b64ToBufferMaybe(rc.photo.imageBase64)) {
+      return res.status(400).json({ success: false, error: "Photo invalide : imageBase64 non décodable" });
     }
 
     const pdfBuffer = await generatePDF(reportContent);
@@ -206,9 +319,13 @@ app.post("/api/generate-and-send", async (req, res) => {
     return res.status(500).json({
       success: false,
       error: "Erreur lors du traitement",
-      details: err.message,
+      details: err && err.message,
     });
   }
+});
+
+app.post("/api/echo", (req, res) => {
+  return res.status(200).json({ ok: true, got: req.body || {} });
 });
 
 app.get("/health", (_req, res) => {
@@ -216,17 +333,18 @@ app.get("/health", (_req, res) => {
     status: "OK",
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
-    service: "PDF Report API"
+    service: "PDF Report API",
   });
 });
 
 app.get("/", (_req, res) => {
   res.json({
     name: "GPT PDF Email API",
-    version: "1.0.0",
+    version: "1.1.0",
     status: "running",
     endpoints: {
       health: "GET /health",
+      echo: "POST /api/echo",
       generateAndSend: "POST /api/generate-and-send",
     },
   });
@@ -236,7 +354,7 @@ app.use((req, res) => res.status(404).json({ error: "Route non trouvée", path: 
 
 app.use((err, _req, res, _next) => {
   console.error("Erreur:", err);
-  res.status(500).json({ error: "Erreur serveur", message: err.message });
+  res.status(500).json({ error: "Erreur serveur", message: err && err.message });
 });
 
 /* ============================ START ============================ */
@@ -246,4 +364,7 @@ app.listen(PORT, "0.0.0.0", () => {
 });
 
 process.on("unhandledRejection", (r) => console.error("Unhandled Rejection:", r));
-process.on("uncaughtException", (e) => { console.error("Uncaught Exception:", e); process.exit(1); });
+process.on("uncaughtException", (e) => {
+  console.error("Uncaught Exception:", e);
+  process.exit(1);
+});
