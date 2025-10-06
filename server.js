@@ -11,7 +11,7 @@ const app = express();
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "Administration STS";
 const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
 
-// SMTP Office 365 (recommandé sur Azure App Service)
+// SMTP Office 365 recommandé (STARTTLS 587)
 const SMTP_HOST = process.env.SMTP_HOST || "smtp.office365.com";
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
 const SMTP_USER = process.env.M365_USER || EMAIL_FROM;
@@ -20,8 +20,6 @@ const SMTP_PASS = process.env.M365_PASSWORD || process.env.M365_APP_PASSWORD;
 /* ========================= MIDDLEWARES ========================= */
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
-
-// CORS (facultatif pour Actions, utile en debug)
 app.use(
   cors({
     origin: true,
@@ -32,7 +30,7 @@ app.use(
 );
 app.options("*", cors());
 
-// Forcer JSON sur nos endpoints (évite certains proxies HTML)
+// Forcer JSON (évite retours HTML proxy) + logs simples
 app.use((req, res, next) => {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
@@ -43,11 +41,12 @@ app.use((req, res, next) => {
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
-  secure: false,              // STARTTLS
+  secure: false,
   requireTLS: true,
   auth: SMTP_USER && SMTP_PASS ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
   tls: { minVersion: "TLSv1.2" },
 });
+
 transporter
   .verify()
   .then(() => console.log("✅ SMTP prêt:", SMTP_HOST, SMTP_PORT))
@@ -69,10 +68,18 @@ function b64ToBufferMaybe(data) {
   }
 }
 
+function looksLikePngOrJpeg(buf) {
+  if (!buf || buf.length < 10) return false;
+  const isJpeg = buf[0] === 0xff && buf[1] === 0xd8;
+  const pngSig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  const isPng = pngSig.every((b, i) => buf[i] === b);
+  return isJpeg || isPng;
+}
+
 function drawTable(doc, { caption, headers = [], rows = [] }, opts = {}) {
   const startX = opts.x || 50;
   let y = opts.y || doc.y;
-  const pageW = doc.page.width - 100; // marges 50
+  const pageW = doc.page.width - 100;
   const colCount = Math.max(headers.length, ...(rows.map((r) => r.length)), 1);
   const colW = pageW / colCount;
   const rowH = 20;
@@ -110,6 +117,37 @@ function drawTable(doc, { caption, headers = [], rows = [] }, opts = {}) {
 
   doc.moveDown();
   return y;
+}
+
+function safeAddImage(doc, { caption, imageBase64 }, opts = {}) {
+  const { label = "image", maxW = doc.page.width - 100, maxH = 300 } = opts;
+  const buf = b64ToBufferMaybe(imageBase64);
+  if (!buf || !looksLikePngOrJpeg(buf)) {
+    console.error(`❌ ${label}: buffer invalide ou format non PNG/JPEG`);
+    if (doc.y > 600) doc.addPage();
+    if (caption) doc.fontSize(12).fillColor("#991b1b").text(`${caption} indisponible`, { align: "left" });
+    doc.moveDown(0.25);
+    doc.rect(50, doc.y, maxW, 40).stroke("#ef4444");
+    doc.moveDown(2);
+    return false;
+  }
+  try {
+    if (doc.y > 600) doc.addPage();
+    if (caption) {
+      doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(caption, { align: "left" });
+      doc.moveDown(0.5);
+    }
+    doc.image(buf, { fit: [maxW, maxH], align: "center" });
+    doc.moveDown(1.5);
+    return true;
+  } catch (e) {
+    console.error(`❌ ${label}: ${e.message}`);
+    if (caption) doc.fontSize(12).fillColor("#991b1b").text(`${caption} non rendue`, { align: "left" });
+    doc.moveDown(0.25);
+    doc.rect(50, doc.y, maxW, 40).stroke("#ef4444");
+    doc.moveDown(2);
+    return false;
+  }
 }
 
 function generatePDF(content) {
@@ -167,43 +205,21 @@ function generatePDF(content) {
         });
       }
 
-      // Tableau (optionnel)
+      // Tableau
       if (content.table && Array.isArray(content.table.rows) && content.table.rows.length) {
         if (doc.y > 650) doc.addPage();
         drawTable(doc, content.table, { x: 50, y: doc.y });
         doc.moveDown(1.5);
       }
 
-      // Graphe (optionnel)
-      if (content.graph && content.graph.imageBase64) {
-        const buf = b64ToBufferMaybe(content.graph.imageBase64);
-        if (buf) {
-          if (doc.y > 600) doc.addPage();
-          doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(content.graph.caption || "Graphe", {
-            align: "left",
-          });
-          doc.moveDown(0.5);
-          const maxW = doc.page.width - 100;
-          const maxH = 280;
-          doc.image(buf, { fit: [maxW, maxH], align: "center" });
-          doc.moveDown(1.5);
-        }
+      // Graphe
+      if (content.graph?.imageBase64) {
+        safeAddImage(doc, { caption: content.graph.caption || "Graphe", imageBase64: content.graph.imageBase64 }, { label: "graph", maxH: 280 });
       }
 
-      // Photo (optionnel)
-      if (content.photo && content.photo.imageBase64) {
-        const buf = b64ToBufferMaybe(content.photo.imageBase64);
-        if (buf) {
-          if (doc.y > 600) doc.addPage();
-          doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(content.photo.caption || "Photo", {
-            align: "left",
-          });
-          doc.moveDown(0.5);
-          const maxW = doc.page.width - 100;
-          const maxH = 320;
-          doc.image(buf, { fit: [maxW, maxH], align: "center" });
-          doc.moveDown(1.5);
-        }
+      // Photo
+      if (content.photo?.imageBase64) {
+        safeAddImage(doc, { caption: content.photo.caption || "Photo", imageBase64: content.photo.imageBase64 }, { label: "photo", maxH: 320 });
       }
 
       // Conclusion
@@ -217,14 +233,13 @@ function generatePDF(content) {
         });
       }
 
-      // Pied de page (pagination)
+      // Pagination
       const pages = doc.bufferedPageRange();
       for (let i = 0; i < pages.count; i++) {
         doc.switchToPage(i);
-        doc
-          .fontSize(8)
-          .fillColor("#9ca3af")
-          .text(`Page ${i + 1} sur ${pages.count}`, 50, doc.page.height - 50, { align: "center" });
+        doc.fontSize(8).fillColor("#9ca3af").text(`Page ${i + 1} sur ${pages.count}`, 50, doc.page.height - 50, {
+          align: "center",
+        });
       }
 
       doc.end();
@@ -243,7 +258,7 @@ async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilena
       html: messageHtml,
       attachments: [{ filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" }],
     },
-    { timeout: 15000 } // évite timeouts proxy
+    { timeout: 15000 }
   );
 }
 
@@ -266,17 +281,27 @@ app.post("/api/generate-and-send", async (req, res) => {
       return res.status(400).json({ success: false, error: "Structure du rapport invalide" });
     }
 
-    // Validations optionnels
+    // Validations optionnelles
     if (rc.table) {
       if (!Array.isArray(rc.table.headers) || !Array.isArray(rc.table.rows)) {
         return res.status(400).json({ success: false, error: "Tableau invalide : headers/rows requis" });
       }
     }
-    if (rc.graph?.imageBase64 && !b64ToBufferMaybe(rc.graph.imageBase64)) {
-      return res.status(400).json({ success: false, error: "Graph invalide : imageBase64 non décodable" });
+    if (rc.graph?.imageBase64) {
+      const gb = b64ToBufferMaybe(rc.graph.imageBase64);
+      if (!looksLikePngOrJpeg(gb)) {
+        return res
+          .status(400)
+          .json({ success: false, error: "Graph invalide : imageBase64 doit être PNG ou JPEG valide" });
+      }
     }
-    if (rc.photo?.imageBase64 && !b64ToBufferMaybe(rc.photo.imageBase64)) {
-      return res.status(400).json({ success: false, error: "Photo invalide : imageBase64 non décodable" });
+    if (rc.photo?.imageBase64) {
+      const pb = b64ToBufferMaybe(rc.photo.imageBase64);
+      if (!looksLikePngOrJpeg(pb)) {
+        return res
+          .status(400)
+          .json({ success: false, error: "Photo invalide : imageBase64 doit être PNG ou JPEG valide" });
+      }
     }
 
     const pdfBuffer = await generatePDF(reportContent);
@@ -309,10 +334,7 @@ app.post("/api/generate-and-send", async (req, res) => {
     return res.json({
       success: true,
       message: "Rapport généré et envoyé avec succès",
-      details: {
-        email,
-        pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
-      },
+      details: { email, pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB` },
     });
   } catch (err) {
     console.error("❌ Erreur:", err);
@@ -340,7 +362,7 @@ app.get("/health", (_req, res) => {
 app.get("/", (_req, res) => {
   res.json({
     name: "GPT PDF Email API",
-    version: "1.1.0",
+    version: "1.1.1",
     status: "running",
     endpoints: {
       health: "GET /health",
