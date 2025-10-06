@@ -4,14 +4,16 @@
  * =========================
  *  GPT PDF Email API (M365)
  * =========================
- * Variables d'environnement requises :
+ * ENV requis :
  *  - O365_SMTP_USER="administration.STS@avocarbon.com"
  *  - O365_SMTP_PASS="shnlgdyfbcztbhxn"
- * Optionnelles :
- *  - EMAIL_FROM_NAME="Administration STS"
+ * Optionnels :
  *  - EMAIL_FROM="administration.STS@avocarbon.com"
+ *  - EMAIL_FROM_NAME="Administration STS"
  *  - PORT=3000
  */
+
+// require("dotenv").config(); // décommente si tu utilises un .env
 
 const express = require("express");
 const PDFDocument = require("pdfkit");
@@ -21,34 +23,29 @@ const crypto = require("crypto");
 const net = require("net");
 const dns = require("dns").promises;
 
-// require("dotenv").config(); // décommente si tu utilises un .env
-
 const app = express();
 
 /* ========================= CONFIG ========================= */
-// SMTP Microsoft 365 (STARTTLS sur 587)
 const SMTP_HOST = "smtp.office365.com";
 const SMTP_PORT = 587;
 
-// Expéditeur par défaut (peut être identique à l'utilisateur SMTP)
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "Administration STS";
 const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
 
-// Identifiants SMTP
 const O365_SMTP_USER = process.env.O365_SMTP_USER || "administration.STS@avocarbon.com";
-const O365_SMTP_PASS = process.env.O365_SMTP_PASS || "shnlgdyfbcztbhxn";
+const O365_SMTP_PASS = process.env.O365_SMTP_PASS || "";
 
-// Hard-stop si pas de mot de passe
-if (!O365_SMTP_PASS) {
-  console.error("❌ O365_SMTP_PASS est vide. Renseignez un mot de passe (ou mot de passe d’application).");
-  // On ne fait pas process.exit pour ne pas casser les /health, mais l'envoi échouera.
+/* ====== Hard-stop si identifiants manquants (évite erreurs confuses) ====== */
+if (!O365_SMTP_USER || !O365_SMTP_PASS) {
+  console.error("❌ SMTP creds manquants : O365_SMTP_USER ou O365_SMTP_PASS est vide.");
+  console.error("   -> Défini les variables d'environnement puis redémarre le service.");
+  process.exit(1);
 }
 
 /* ========================= MIDDLEWARES ========================= */
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-// CORS permissif
 app.use(
   cors({
     origin: true,
@@ -63,11 +60,8 @@ app.use(
     ],
   })
 );
-
-// Préflight pour toutes les routes
 app.options("*", cors());
 
-// Ajoute un Correlation-Id à chaque requête + log d'en-têtes utiles
 app.use((req, _res, next) => {
   const cid = req.headers["x-correlation-id"] || crypto.randomUUID();
   req.correlationId = cid;
@@ -79,26 +73,25 @@ app.use((req, _res, next) => {
 });
 
 /* ====================== TRANSPORTEUR SMTP ====================== */
-// logger: true + debug: true => logs SMTP détaillés
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
-  secure: false,            // STARTTLS sur 587
+  secure: false,     // STARTTLS sur 587
   requireTLS: true,
-  auth: {
-    user: O365_SMTP_USER,
-    pass: O365_SMTP_PASS,
-  },
+  auth: { user: O365_SMTP_USER, pass: O365_SMTP_PASS },
   tls: { minVersion: "TLSv1.2" },
   connectionTimeout: 20_000,
   greetingTimeout: 20_000,
   socketTimeout: 30_000,
   pool: true,
-  logger: true,             // log interne Nodemailer
-  debug: true,              // trace protocolaire
+  logger: true,      // logs Nodemailer
+  debug: true,       // traces protocole SMTP
 });
 
-// Vérification au démarrage (avec logs robustes)
+console.log(
+  `SMTP creds chargés -> user=${O365_SMTP_USER.replace(/.(?=.{3})/g, "*")} passLen=${O365_SMTP_PASS.length}`
+);
+
 (async () => {
   try {
     await transporter.verify();
@@ -134,47 +127,50 @@ function formatSmtpError(err) {
   };
 }
 
+/* ===================== PDF GENERATION (corrigé) ===================== */
 function generatePDF(content) {
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({
         margin: 50,
         size: "A4",
+        bufferPages: true, // ✅ indispensable pour switchToPage
         info: {
           Title: content.title,
           Author: "Assistant GPT",
           Subject: content.title,
         },
       });
+
       const chunks = [];
       doc.on("data", (c) => chunks.push(c));
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
+      // ======= Contenu =======
       // Titre
-      doc.fontSize(26).font("Helvetica-Bold").fillColor("#1e40af").text(content.title || "Rapport", { align: "center" });
+      doc.fontSize(26).font("Helvetica-Bold").fillColor("#1e40af")
+         .text(content.title || "Rapport", { align: "center" });
       doc.moveDown(0.5);
 
       // Ligne
-      doc.strokeColor("#3b82f6").lineWidth(2).moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+      doc.strokeColor("#3b82f6").lineWidth(2)
+         .moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
       doc.moveDown();
 
       // Date
-      doc
-        .fontSize(10)
-        .fillColor("#6b7280")
-        .font("Helvetica")
-        .text(
-          `Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`,
-          { align: "right" }
-        );
+      doc.fontSize(10).fillColor("#6b7280").font("Helvetica")
+         .text(`Date: ${new Date().toLocaleDateString("fr-FR", {
+            year: "numeric", month: "long", day: "numeric"
+         })}`, { align: "right" });
       doc.moveDown(2);
 
       // Introduction
       if (content.introduction) {
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Introduction");
         doc.moveDown(0.5);
-        doc.fontSize(11).font("Helvetica").fillColor("#374151").text(content.introduction, { align: "justify", lineGap: 3 });
+        doc.fontSize(11).font("Helvetica").fillColor("#374151")
+           .text(content.introduction, { align: "justify", lineGap: 3 });
         doc.moveDown(2);
       }
 
@@ -182,9 +178,11 @@ function generatePDF(content) {
       if (Array.isArray(content.sections)) {
         content.sections.forEach((section, index) => {
           if (doc.y > 650) doc.addPage();
-          doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(`${index + 1}. ${section.title || "Section"}`);
+          doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af")
+             .text(`${index + 1}. ${section.title || "Section"}`);
           doc.moveDown(0.5);
-          doc.fontSize(11).font("Helvetica").fillColor("#374151").text(section.content || "", { align: "justify", lineGap: 3 });
+          doc.fontSize(11).font("Helvetica").fillColor("#374151")
+             .text(section.content || "", { align: "justify", lineGap: 3 });
           doc.moveDown(1.5);
         });
       }
@@ -194,14 +192,27 @@ function generatePDF(content) {
         if (doc.y > 650) doc.addPage();
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Conclusion");
         doc.moveDown(0.5);
-        doc.fontSize(11).font("Helvetica").fillColor("#374151").text(content.conclusion, { align: "justify", lineGap: 3 });
+        doc.fontSize(11).font("Helvetica").fillColor("#374151")
+           .text(content.conclusion, { align: "justify", lineGap: 3 });
       }
 
-      // Pagination
-      const pages = doc.bufferedPageRange();
-      for (let i = 0; i < pages.count; i++) {
-        doc.switchToPage(i);
-        doc.fontSize(8).fillColor("#9ca3af").text(`Page ${i + 1} sur ${pages.count}`, 50, doc.page.height - 50, { align: "center" });
+      // ======= Pagination (AVANT doc.end) =======
+      try {
+        console.log("[PDF] Pagination: start");
+        const range = doc.bufferedPageRange(); // { start, count }
+        console.log("[PDF] bufferedPageRange =", range);
+        for (let i = range.start; i < range.start + range.count; i++) {
+          doc.switchToPage(i); // ✅ possible car bufferPages:true
+          doc.fontSize(8).fillColor("#9ca3af").text(
+            `Page ${i - range.start + 1} sur ${range.count}`,
+            50,
+            doc.page.height - 50,
+            { align: "center", width: doc.page.width - 100 }
+          );
+        }
+        console.log("[PDF] Pagination: done");
+      } catch (e) {
+        console.error("⚠️ Pagination error (non bloquant):", e.message);
       }
 
       doc.end();
@@ -211,9 +222,9 @@ function generatePDF(content) {
   });
 }
 
+/* ====================== ENVOI EMAIL ====================== */
 async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilename, cid }) {
-  // Masquer l'email expéditeur dans les logs si besoin
-  console.log(`[CID:${cid}] Envoi e-mail via ${SMTP_HOST}:${SMTP_PORT} en tant que ${O365_SMTP_USER}`);
+  console.log(`[CID:${cid}] Envoi e-mail via ${SMTP_HOST}:${SMTP_PORT} en tant que ${O365_SMTP_USER.replace(/.(?=.{3})/g, "*")}`);
   return transporter.sendMail({
     from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM },
     to,
@@ -223,16 +234,27 @@ async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilena
   });
 }
 
-/* ================ ENDPOINT DIAGNOSTIC RESEAU/SMTP ================ */
+/* ================ ENDPOINTS DIAGNOSTIC ================ */
+// Vérification config (sans exposer secrets)
+app.get("/config-check", (_req, res) => {
+  res.json({
+    smtpHost: SMTP_HOST,
+    smtpPort: SMTP_PORT,
+    hasUser: !!O365_SMTP_USER,
+    hasPass: !!O365_SMTP_PASS,
+    userMasked: O365_SMTP_USER ? O365_SMTP_USER.replace(/.(?=.{3})/g, "*") : null,
+    passLen: O365_SMTP_PASS ? O365_SMTP_PASS.length : 0,
+  });
+});
+
 /**
  * GET /diag
- * Diagnostique : résolution DNS, connectivité TCP 587, verify Nodemailer.
+ * Diagnostique : DNS, TCP 587, verify Nodemailer
  */
 app.get("/diag", async (req, res) => {
   const cid = req.correlationId || crypto.randomUUID();
   const out = { correlationId: cid, host: SMTP_HOST, port: SMTP_PORT, steps: [] };
 
-  // 1) DNS lookup
   try {
     const a = await dns.lookup(SMTP_HOST, { all: true });
     out.steps.push({ step: "dns.lookup", ok: true, addresses: a });
@@ -240,31 +262,22 @@ app.get("/diag", async (req, res) => {
     out.steps.push({ step: "dns.lookup", ok: false, error: e.message });
   }
 
-  // 2) TCP connect test
   const tcpResult = await new Promise((resolve) => {
     const socket = new net.Socket();
     let done = false;
     socket.setTimeout(6000);
     socket.connect(SMTP_PORT, SMTP_HOST, () => {
-      done = true;
-      socket.destroy();
-      resolve({ ok: true });
+      done = true; socket.destroy(); resolve({ ok: true });
     });
     socket.on("error", (err) => {
-      if (done) return;
-      done = true;
-      resolve({ ok: false, error: err.message, code: err.code });
+      if (done) return; done = true; resolve({ ok: false, error: err.message, code: err.code });
     });
     socket.on("timeout", () => {
-      if (done) return;
-      done = true;
-      socket.destroy();
-      resolve({ ok: false, error: "timeout" });
+      if (done) return; done = true; socket.destroy(); resolve({ ok: false, error: "timeout" });
     });
   });
   out.steps.push({ step: "tcp-connect", ...tcpResult });
 
-  // 3) Nodemailer verify
   try {
     await transporter.verify();
     out.steps.push({ step: "transporter.verify", ok: true });
@@ -276,27 +289,18 @@ app.get("/diag", async (req, res) => {
 });
 
 /* ============================ ROUTES ============================ */
-
 /**
  * POST /api/generate-and-send
- * Corps JSON :
- * {
- *   "email": "destinataire@exemple.com",
- *   "subject": "Rapport - [TITRE]",
- *   "reportContent": { "title": "...", "introduction": "...", "sections": [{ "title": "...", "content": "..." }], "conclusion": "..." }
- * }
  */
 app.post("/api/generate-and-send", async (req, res) => {
   const cid = req.correlationId || crypto.randomUUID();
   try {
     const { email, subject, reportContent } = req.body || {};
 
-    // Validations
     if (!email || !subject || !reportContent) {
       console.warn(`[CID:${cid}] 400 - Données manquantes`);
       return res.status(400).json({
-        success: false,
-        correlationId: cid,
+        success: false, correlationId: cid,
         error: "Données manquantes",
         details: "Envoyez email, subject, reportContent",
       });
@@ -308,8 +312,7 @@ app.post("/api/generate-and-send", async (req, res) => {
     if (!reportContent.title || !reportContent.introduction || !Array.isArray(reportContent.sections) || !reportContent.conclusion) {
       console.warn(`[CID:${cid}] 400 - Structure du rapport invalide`);
       return res.status(400).json({
-        success: false,
-        correlationId: cid,
+        success: false, correlationId: cid,
         error: "Structure du rapport invalide",
         details: "reportContent doit contenir title, introduction, sections (array {title, content}), conclusion",
       });
@@ -320,7 +323,7 @@ app.post("/api/generate-and-send", async (req, res) => {
     const pdfName = `rapport_${sanitizeFileName(reportContent.title)}_${Date.now()}.pdf`;
     console.log(`[CID:${cid}] PDF généré (${(pdfBuffer.length / 1024).toFixed(2)} KB) -> ${pdfName}`);
 
-    // Corps HTML de l'e-mail
+    // Email HTML
     const html = `<!DOCTYPE html>
 <html><body style="font-family: Arial, sans-serif; line-height:1.6; color:#111827;">
   <h2 style="margin:0 0 8px 0;">📄 Votre rapport est prêt</h2>
@@ -336,7 +339,7 @@ app.post("/api/generate-and-send", async (req, res) => {
     try {
       await sendEmailWithPdf({
         to: email,
-        subject,         // on respecte le sujet du client
+        subject,
         messageHtml: html,
         pdfBuffer,
         pdfFilename: pdfName,
@@ -344,7 +347,6 @@ app.post("/api/generate-and-send", async (req, res) => {
       });
       console.log(`[CID:${cid}] ✅ E-mail envoyé à ${email} (sujet="${subject}")`);
     } catch (err) {
-      // Logs riches + retour 502
       const info = formatSmtpError(err);
       console.error(`[CID:${cid}] ❌ SMTP error`, info);
       return res.status(502).json({
@@ -377,8 +379,7 @@ app.post("/api/generate-and-send", async (req, res) => {
 });
 
 /**
- * POST /api/generate
- * -> Génère le PDF et le renvoie en téléchargement (sans e-mail)
+ * POST /api/generate  -> Génère et renvoie le PDF sans email
  */
 app.post("/api/generate", async (req, res) => {
   const cid = req.correlationId || crypto.randomUUID();
@@ -387,8 +388,7 @@ app.post("/api/generate", async (req, res) => {
     if (!reportContent || !reportContent.title || !reportContent.introduction || !Array.isArray(reportContent.sections) || !reportContent.conclusion) {
       console.warn(`[CID:${cid}] 400 - Structure du rapport invalide (generate)`);
       return res.status(400).json({
-        success: false,
-        correlationId: cid,
+        success: false, correlationId: cid,
         error: "Structure du rapport invalide",
         details: "reportContent doit contenir title, introduction, sections (array {title, content}), conclusion",
       });
@@ -425,12 +425,13 @@ app.get("/health", (_req, res) => {
 app.get("/", (_req, res) => {
   res.json({
     name: "GPT PDF Email API",
-    version: "1.2.0",
+    version: "1.3.0",
     status: "running",
     smtpHost: SMTP_HOST,
     smtpPort: SMTP_PORT,
     endpoints: {
       health: "GET /health",
+      configCheck: "GET /config-check",
       diag: "GET /diag",
       generateAndSend: "POST /api/generate-and-send",
       generateOnly: "POST /api/generate",
@@ -453,7 +454,7 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 API démarrée sur port ${PORT}`);
 });
 
-// Gestion des erreurs non catchées
+// Erreurs non catchées
 process.on("unhandledRejection", (r) => console.error("Unhandled Rejection:", r));
 process.on("uncaughtException", (e) => {
   console.error("Uncaught Exception:", e);
