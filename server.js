@@ -1,24 +1,3 @@
-/**
- * server.js — API GPT PDF Email (SMTP EOP :25, sans authentification)
- * Dépendances :  npm i express pdfkit nodemailer cors
- * Test POST (Postman):
- *   URL:     http://localhost:3000/api/generate-and-send
- *   Headers: Content-Type: application/json
- *   Body: {
- *     "email": "majed.messai@avocarbon.com",
- *     "subject": "Test de rapport GPT",
- *     "reportContent": {
- *       "title": "Rapport hebdo STS",
- *       "introduction": "Résumé des activités de la semaine.",
- *       "sections": [
- *         { "title": "Incidents", "content": "Aucun incident critique." },
- *         { "title": "Projets", "content": "Avancement normal." }
- *       ],
- *       "conclusion": "Actions prévues."
- *     }
- *   }
- */
-
 "use strict";
 
 const express = require("express");
@@ -27,35 +6,36 @@ const nodemailer = require("nodemailer");
 const cors = require("cors");
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+
 /* ========================= CONFIG FIXE ========================= */
-/** Mode EOP (relay) — pas d'authentification */
 const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
 const SMTP_PORT = 25;
-
-/** Identité d'expéditeur (doit être autorisée par le connector) */
 const EMAIL_FROM_NAME = "Administration STS";
 const EMAIL_FROM = "administration.STS@avocarbon.com";
 
 /* ========================= MIDDLEWARES ========================= */
 app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true })); // accepte aussi x-www-form-urlencoded
+app.use(express.urlencoded({ extended: true }));
+
+// CORS plus permissif pour ChatGPT
 app.use(
   cors({
-    origin: "*",
-    methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    origin: true,
+    credentials: true,
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "openai-conversation-id", "openai-ephemeral-user-id"],
   })
 );
 
-// Log simple + type de contenu pour debug
+// Préflight pour toutes les routes
+app.options("*", cors());
+
 app.use((req, _res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} | type=${req.get("content-type") || "n/a"}`);
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
 });
 
 /* ====================== TRANSPORTEUR SMTP ====================== */
-/** IMPORTANT : pas d'auth ici. L'IP publique du serveur doit être autorisée dans un connector O365. */
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
@@ -63,10 +43,9 @@ const transporter = nodemailer.createTransport({
   tls: { minVersion: "TLSv1.2" },
 });
 
-// Test transport SMTP au démarrage
 transporter
   .verify()
-  .then(() => console.log("✅ SMTP EOP prêt (port 25, sans auth)"))
+  .then(() => console.log("✅ SMTP EOP prêt"))
   .catch((err) => console.error("❌ SMTP erreur:", err.message));
 
 /* ============================ UTILS ============================ */
@@ -74,9 +53,6 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-/**
- * Génère un PDF (Buffer) depuis {title, introduction, sections:[{title,content}], conclusion}
- */
 function generatePDF(content) {
   return new Promise((resolve, reject) => {
     try {
@@ -91,13 +67,11 @@ function generatePDF(content) {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
-      // En-tête
       doc.fontSize(26).font("Helvetica-Bold").fillColor("#1e40af").text(content.title, { align: "center" });
       doc.moveDown(0.5);
       doc.strokeColor("#3b82f6").lineWidth(2).moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
       doc.moveDown();
 
-      // Date
       doc
         .fontSize(10)
         .fillColor("#6b7280")
@@ -108,7 +82,6 @@ function generatePDF(content) {
         );
       doc.moveDown(2);
 
-      // Introduction
       if (content.introduction) {
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Introduction");
         doc.moveDown(0.5);
@@ -117,7 +90,6 @@ function generatePDF(content) {
         doc.moveDown(2);
       }
 
-      // Sections
       if (Array.isArray(content.sections)) {
         content.sections.forEach((section, index) => {
           if (doc.y > 650) doc.addPage();
@@ -129,7 +101,6 @@ function generatePDF(content) {
         });
       }
 
-      // Conclusion
       if (content.conclusion) {
         if (doc.y > 650) doc.addPage();
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Conclusion");
@@ -138,7 +109,6 @@ function generatePDF(content) {
           .text(content.conclusion, { align: "justify", lineGap: 3 });
       }
 
-      // Pagination
       const pages = doc.bufferedPageRange();
       for (let i = 0; i < pages.count; i++) {
         doc.switchToPage(i);
@@ -157,12 +127,9 @@ function generatePDF(content) {
   });
 }
 
-/**
- * Envoie un email avec le PDF en pièce jointe (via EOP port 25)
- */
 async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilename }) {
   return transporter.sendMail({
-    from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM }, // doit être autorisé par le connector
+    from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM },
     to,
     subject,
     html: messageHtml,
@@ -181,17 +148,7 @@ app.post("/api/generate-and-send", async (req, res) => {
       return res.status(400).json({
         success: false,
         error: "Données manquantes",
-        details: "Envoyez un JSON avec email, subject, reportContent",
-        example: {
-          email: "majed.messai@avocarbon.com",
-          subject: "Test",
-          reportContent: {
-            title: "Titre",
-            introduction: "Intro",
-            sections: [{ title: "S1", content: "C1" }],
-            conclusion: "Fin",
-          },
-        },
+        details: "Envoyez email, subject, reportContent",
       });
     }
     if (!isValidEmail(email)) {
@@ -206,15 +163,12 @@ app.post("/api/generate-and-send", async (req, res) => {
       return res.status(400).json({
         success: false,
         error: "Structure du rapport invalide",
-        details: "title, introduction, sections (array), conclusion sont requis",
       });
     }
 
-    // Génération du PDF
     const pdfBuffer = await generatePDF(reportContent);
     const pdfName = `rapport_${reportContent.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf`;
 
-    // Corps HTML du mail
     const html = `
       <!DOCTYPE html>
       <html>
@@ -231,7 +185,6 @@ app.post("/api/generate-and-send", async (req, res) => {
       </html>
     `;
 
-    // Envoi
     await sendEmailWithPdf({
       to: email,
       subject: `Rapport : ${reportContent.title}`,
@@ -242,7 +195,7 @@ app.post("/api/generate-and-send", async (req, res) => {
 
     return res.json({
       success: true,
-      message: "Rapport généré et envoyé avec succès (EOP relay, sans auth)",
+      message: "Rapport généré et envoyé avec succès",
       details: {
         email,
         pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
@@ -262,18 +215,16 @@ app.get("/health", (_req, res) => {
   res.json({
     status: "OK",
     timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    smtp_host: SMTP_HOST,
-    smtp_port: SMTP_PORT,
-    mode: "EOP (relay sans auth)",
-    from: EMAIL_FROM,
+    uptime: Math.floor(process.uptime()),
+    service: "PDF Report API"
   });
 });
 
 app.get("/", (_req, res) => {
   res.json({
-    name: "GPT PDF Email API (EOP :25, sans auth)",
+    name: "GPT PDF Email API",
     version: "1.0.0",
+    status: "running",
     endpoints: {
       health: "GET /health",
       generateAndSend: "POST /api/generate-and-send",
@@ -281,27 +232,18 @@ app.get("/", (_req, res) => {
   });
 });
 
-// 404
 app.use((req, res) => res.status(404).json({ error: "Route non trouvée", path: req.path }));
 
-// 500
 app.use((err, _req, res, _next) => {
-  console.error("Erreur globale:", err);
-  res.status(500).json({ error: "Erreur serveur interne", message: err.message });
+  console.error("Erreur:", err);
+  res.status(500).json({ error: "Erreur serveur", message: err.message });
 });
 
 /* ============================ START ============================ */
-const PORT = 3000;
-app.listen(PORT, () => {
-  console.log(`
-╔════════════════════════════════════════╗
-║   🚀 API GPT PDF Email (EOP :25)      ║
-║   📡 Port: ${PORT}
-║   🌍 Mode: EOP relay (sans auth)
-╚════════════════════════════════════════╝
-  `);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 API démarrée sur port ${PORT}`);
 });
 
-// Hardening erreurs non capturées
 process.on("unhandledRejection", (r) => console.error("Unhandled Rejection:", r));
 process.on("uncaughtException", (e) => { console.error("Uncaught Exception:", e); process.exit(1); });
