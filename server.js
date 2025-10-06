@@ -33,7 +33,7 @@ const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "Administration STS";
 const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
 
 const O365_SMTP_USER = process.env.O365_SMTP_USER || "administration.STS@avocarbon.com";
-const O365_SMTP_PASS = process.env.O365_SMTP_PASS || "";
+const O365_SMTP_PASS = process.env.O365_SMTP_PASS || "shnlgdyfbcztbhxn";
 
 /* ====== Hard-stop si identifiants manquants (évite erreurs confuses) ====== */
 if (!O365_SMTP_USER || !O365_SMTP_PASS) {
