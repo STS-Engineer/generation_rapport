@@ -6,7 +6,7 @@
  * =========================
  * Prérequis ENV :
  *  - O365_SMTP_USER="administration.STS@avocarbon.com"
- *  - O365_SMTP_PASS="*** mot de passe (ou mot de passe d’application) ***"
+ *  - O365_SMTP_PASS="shnlgdyfbcztbhxn"
  *  - EMAIL_FROM_NAME="Administration STS" (optionnel)
  *  - EMAIL_FROM="administration.STS@avocarbon.com" (optionnel)
  *  - PORT=3000 (optionnel)
