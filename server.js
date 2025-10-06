@@ -11,10 +11,10 @@ const app = express();
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "Administration STS";
 const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
 
-// SMTP Office 365 recommandé (STARTTLS 587)
+// SMTP Office 365 (recommandé sur Azure App Service)
 const SMTP_HOST = process.env.SMTP_HOST || "smtp.office365.com";
 const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
-const SMTP_USER = process.env.M365_USER || EMAIL_FROM;                 // Doit être autorisé pour "Send As"
+const SMTP_USER = process.env.M365_USER || EMAIL_FROM; // doit être autorisé à envoyer
 const SMTP_PASS = process.env.M365_PASSWORD || process.env.M365_APP_PASSWORD;
 
 /* ========================= MIDDLEWARES ========================= */
@@ -31,7 +31,7 @@ app.use(
 );
 app.options("*", cors());
 
-// Forcer JSON (évite retours HTML proxy) + logs simples
+// Forcer JSON + log
 app.use((req, res, next) => {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
@@ -42,7 +42,7 @@ app.use((req, res, next) => {
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
-  secure: false,          // STARTTLS
+  secure: false,            // STARTTLS
   requireTLS: true,
   auth: SMTP_USER && SMTP_PASS ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
   tls: { minVersion: "TLSv1.2" },
@@ -62,26 +62,22 @@ function b64ToBufferMaybe(data) {
   if (!data) return null;
   const commaIdx = data.indexOf(",");
   const b64 = data.startsWith("data:") ? data.slice(commaIdx + 1) : data;
-  try {
-    return Buffer.from(b64, "base64");
-  } catch {
-    return null;
-  }
+  try { return Buffer.from(b64, "base64"); } catch { return null; }
 }
 
 function looksLikePngOrJpeg(buf) {
   if (!buf || buf.length < 10) return false;
   const isJpeg = buf[0] === 0xff && buf[1] === 0xd8;
-  const pngSig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-  const isPng = pngSig.every((b, i) => buf[i] === b);
+  const pngSig = [0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a];
+  const isPng = pngSig.every((b,i)=>buf[i]===b);
   return isJpeg || isPng;
 }
 
 function drawTable(doc, { caption, headers = [], rows = [] }, opts = {}) {
   const startX = opts.x || 50;
   let y = opts.y || doc.y;
-  const pageW = doc.page.width - 100; // 50 de marge chaque côté
-  const colCount = Math.max(headers.length, ...(rows.map((r) => r.length)), 1);
+  const pageW = doc.page.width - 100; // marges 50
+  const colCount = Math.max(headers.length, ...(rows.map(r => r.length)), 1);
   const colW = pageW / colCount;
   const rowH = 20;
 
@@ -94,12 +90,12 @@ function drawTable(doc, { caption, headers = [], rows = [] }, opts = {}) {
     doc.rect(startX, y, pageW, rowH).fill("#e5e7eb").stroke("#d1d5db");
     headers.forEach((h, i) => {
       doc.fillColor("#111827").font("Helvetica-Bold").fontSize(10)
-        .text(String(h), startX + i * colW + 6, y + 6, { width: colW - 12, ellipsis: true });
+         .text(String(h), startX + i*colW + 6, y + 6, { width: colW - 12, ellipsis: true });
     });
     y += rowH;
   }
 
-  rows.forEach((row) => {
+  rows.forEach(row => {
     if (y + rowH > doc.page.height - 80) {
       doc.addPage();
       y = 50;
@@ -107,7 +103,7 @@ function drawTable(doc, { caption, headers = [], rows = [] }, opts = {}) {
     doc.rect(startX, y, pageW, rowH).stroke("#e5e7eb");
     row.forEach((cell, i) => {
       doc.fillColor("#374151").font("Helvetica").fontSize(10)
-        .text(String(cell ?? ""), startX + i * colW + 6, y + 6, { width: colW - 12, ellipsis: true });
+         .text(String(cell ?? ""), startX + i*colW + 6, y + 6, { width: colW - 12, ellipsis: true });
     });
     y += rowH;
   });
@@ -152,96 +148,86 @@ function generatePDF(content) {
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({
-        bufferPages: true, // ✅ indispensable pour switchToPage
+        // pas besoin de bufferPages ici (on ne fait pas switchToPage)
         margin: 50,
         size: "A4",
         info: { Title: content.title, Author: "Assistant GPT", Subject: content.title },
       });
 
       const chunks = [];
-      doc.on("data", (c) => chunks.push(c));
+      doc.on("data", c => chunks.push(c));
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
-      // Titre
+      // Pagination “Page X” (sans total) sur chaque page
+      let pageIndex = 0;
+      function writeFooter() {
+        const page = doc.page;
+        doc.fontSize(8).fillColor("#9ca3af")
+           .text(`Page ${pageIndex + 1}`, 50, page.height - 50, { align: "center" });
+        pageIndex++;
+      }
+      // footer pour la 1re page
+      writeFooter();
+      // footer pour chaque nouvelle page
+      doc.on("pageAdded", writeFooter);
+
+      // ======== Titre
       doc.fontSize(26).font("Helvetica-Bold").fillColor("#1e40af").text(content.title, { align: "center" });
       doc.moveDown(0.5);
       doc.strokeColor("#3b82f6").lineWidth(2).moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
       doc.moveDown();
 
-      // Date
-      doc
-        .fontSize(10)
-        .fillColor("#6b7280")
-        .font("Helvetica")
-        .text(`Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`, {
-          align: "right",
-        });
+      // ======== Date
+      doc.fontSize(10).fillColor("#6b7280").font("Helvetica")
+         .text(`Date: ${new Date().toLocaleDateString("fr-FR", { year:"numeric", month:"long", day:"numeric" })}`, { align: "right" });
       doc.moveDown(2);
 
-      // Introduction
+      // ======== Introduction
       if (content.introduction) {
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Introduction");
         doc.moveDown(0.5);
-        doc.fontSize(11).font("Helvetica").fillColor("#374151").text(content.introduction, {
-          align: "justify",
-          lineGap: 3,
-        });
+        doc.fontSize(11).font("Helvetica").fillColor("#374151")
+           .text(content.introduction, { align: "justify", lineGap: 3 });
         doc.moveDown(2);
       }
 
-      // Sections
+      // ======== Sections
       if (Array.isArray(content.sections)) {
         content.sections.forEach((section, index) => {
           if (doc.y > 650) doc.addPage();
           doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(`${index + 1}. ${section.title}`);
           doc.moveDown(0.5);
-          doc.fontSize(11).font("Helvetica").fillColor("#374151").text(section.content, {
-            align: "justify",
-            lineGap: 3,
-          });
+          doc.fontSize(11).font("Helvetica").fillColor("#374151")
+             .text(section.content, { align: "justify", lineGap: 3 });
           doc.moveDown(1.5);
         });
       }
 
-      // Tableau
+      // ======== Tableau (optionnel)
       if (content.table && Array.isArray(content.table.rows) && content.table.rows.length) {
         if (doc.y > 650) doc.addPage();
         drawTable(doc, content.table, { x: 50, y: doc.y });
         doc.moveDown(1.5);
       }
 
-      // Graphe
+      // ======== Graphe (optionnel)
       if (content.graph?.imageBase64) {
         safeAddImage(doc, { caption: content.graph.caption || "Graphe", imageBase64: content.graph.imageBase64 }, { label: "graph", maxH: 280 });
       }
 
-      // Photo
+      // ======== Photo (optionnel)
       if (content.photo?.imageBase64) {
         safeAddImage(doc, { caption: content.photo.caption || "Photo", imageBase64: content.photo.imageBase64 }, { label: "photo", maxH: 320 });
       }
 
-      // Conclusion
+      // ======== Conclusion
       if (content.conclusion) {
         if (doc.y > 650) doc.addPage();
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Conclusion");
         doc.moveDown(0.5);
-        doc.fontSize(11).font("Helvetica").fillColor("#374151").text(content.conclusion, {
-          align: "justify",
-          lineGap: 3,
-        });
-      }
-
-      // Pagination (avec garde-fou)
-      const pages = doc.bufferedPageRange(); // { start, count }
-      if (pages && typeof pages.count === "number" && pages.count > 0) {
-        for (let i = 0; i < pages.count; i++) {
-          doc.switchToPage(i);
-          doc
-            .fontSize(8)
-            .fillColor("#9ca3af")
-            .text(`Page ${i + 1} sur ${pages.count}`, 50, doc.page.height - 50, { align: "center" });
-        }
+        doc.fontSize(11).font("Helvetica").fillColor("#374151")
+           .text(content.conclusion, { align: "justify", lineGap: 3 });
       }
 
       doc.end();
@@ -362,7 +348,7 @@ app.get("/health", (_req, res) => {
 app.get("/", (_req, res) => {
   res.json({
     name: "GPT PDF Email API",
-    version: "1.1.2",
+    version: "1.2.0",
     status: "running",
     endpoints: {
       health: "GET /health",
@@ -386,7 +372,4 @@ app.listen(PORT, "0.0.0.0", () => {
 });
 
 process.on("unhandledRejection", (r) => console.error("Unhandled Rejection:", r));
-process.on("uncaughtException", (e) => {
-  console.error("Uncaught Exception:", e);
-  process.exit(1);
-});
+process.on("uncaughtException", (e) => { console.error("Uncaught Exception:", e); process.exit(1); });
