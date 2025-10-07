@@ -59,6 +59,7 @@ function generatePDF(content) {
       const doc = new PDFDocument({
         margin: 50,
         size: "A4",
+        bufferPages: true, // IMPORTANT: Active le buffer des pages
         info: { Title: content.title, Author: "Assistant GPT", Subject: content.title },
       });
 
@@ -96,7 +97,7 @@ function generatePDF(content) {
       // Sections
       if (Array.isArray(content.sections)) {
         content.sections.forEach((section, index) => {
-          // Vérifier si besoin d'une nouvelle page (marge de sécurité à 100px du bas)
+          // Vérifier si besoin d'une nouvelle page
           if (doc.y > doc.page.height - 150) {
             doc.addPage();
           }
@@ -111,7 +112,6 @@ function generatePDF(content) {
 
       // Conclusion
       if (content.conclusion) {
-        // Vérifier si besoin d'une nouvelle page
         if (doc.y > doc.page.height - 150) {
           doc.addPage();
         }
@@ -122,30 +122,38 @@ function generatePDF(content) {
           .text(content.conclusion, { align: "justify", lineGap: 3 });
       }
 
-      // CORRECTION: Ajouter les numéros de page AVANT de finaliser le document
+      // SOLUTION: Ajouter les numéros de page AVANT doc.end()
       const range = doc.bufferedPageRange();
+      
       for (let i = 0; i < range.count; i++) {
         doc.switchToPage(i);
         
-        // Pied de page avec numéro
-        const oldBottomMargin = doc.page.margins.bottom;
-        doc.page.margins.bottom = 0; // Temporairement enlever la marge pour écrire en bas
+        // Sauvegarder la position actuelle
+        const oldY = doc.y;
         
-        doc.fontSize(8).fillColor("#9ca3af").text(
+        // Positionner en bas de page
+        doc.fontSize(8).fillColor("#9ca3af");
+        doc.text(
           `Page ${i + 1} sur ${range.count}`,
           50,
           doc.page.height - 50,
           { 
             align: "center",
-            lineBreak: false
+            lineBreak: false,
+            width: doc.page.width - 100
           }
         );
         
-        doc.page.margins.bottom = oldBottomMargin; // Restaurer la marge
+        // Restaurer la position si ce n'est pas la dernière page
+        if (i < range.count - 1) {
+          doc.switchToPage(i);
+          doc.y = oldY;
+        }
       }
 
       doc.end();
     } catch (err) {
+      console.error("Erreur génération PDF:", err);
       reject(err);
     }
   });
