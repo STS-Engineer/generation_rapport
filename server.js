@@ -67,11 +67,13 @@ function generatePDF(content) {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
+      // En-tête
       doc.fontSize(26).font("Helvetica-Bold").fillColor("#1e40af").text(content.title, { align: "center" });
       doc.moveDown(0.5);
       doc.strokeColor("#3b82f6").lineWidth(2).moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
       doc.moveDown();
 
+      // Date
       doc
         .fontSize(10)
         .fillColor("#6b7280")
@@ -82,6 +84,7 @@ function generatePDF(content) {
         );
       doc.moveDown(2);
 
+      // Introduction
       if (content.introduction) {
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Introduction");
         doc.moveDown(0.5);
@@ -90,9 +93,14 @@ function generatePDF(content) {
         doc.moveDown(2);
       }
 
+      // Sections
       if (Array.isArray(content.sections)) {
         content.sections.forEach((section, index) => {
-          if (doc.y > 650) doc.addPage();
+          // Vérifier si besoin d'une nouvelle page (marge de sécurité à 100px du bas)
+          if (doc.y > doc.page.height - 150) {
+            doc.addPage();
+          }
+          
           doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(`${index + 1}. ${section.title}`);
           doc.moveDown(0.5);
           doc.fontSize(11).font("Helvetica").fillColor("#374151")
@@ -101,23 +109,39 @@ function generatePDF(content) {
         });
       }
 
+      // Conclusion
       if (content.conclusion) {
-        if (doc.y > 650) doc.addPage();
+        // Vérifier si besoin d'une nouvelle page
+        if (doc.y > doc.page.height - 150) {
+          doc.addPage();
+        }
+        
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Conclusion");
         doc.moveDown(0.5);
         doc.fontSize(11).font("Helvetica").fillColor("#374151")
           .text(content.conclusion, { align: "justify", lineGap: 3 });
       }
 
-      const pages = doc.bufferedPageRange();
-      for (let i = 0; i < pages.count; i++) {
+      // CORRECTION: Ajouter les numéros de page AVANT de finaliser le document
+      const range = doc.bufferedPageRange();
+      for (let i = 0; i < range.count; i++) {
         doc.switchToPage(i);
+        
+        // Pied de page avec numéro
+        const oldBottomMargin = doc.page.margins.bottom;
+        doc.page.margins.bottom = 0; // Temporairement enlever la marge pour écrire en bas
+        
         doc.fontSize(8).fillColor("#9ca3af").text(
-          `Page ${i + 1} sur ${pages.count}`,
+          `Page ${i + 1} sur ${range.count}`,
           50,
           doc.page.height - 50,
-          { align: "center" }
+          { 
+            align: "center",
+            lineBreak: false
+          }
         );
+        
+        doc.page.margins.bottom = oldBottomMargin; // Restaurer la marge
       }
 
       doc.end();
