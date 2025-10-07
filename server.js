@@ -348,10 +348,11 @@ app.post("/api/test-image", async (req, res) => {
     const buffer = Buffer.from(base64Data, 'base64');
     
     // Vérifier taille
-    if (buffer.length < 100) {
+    if (buffer.length < 500) {
       return res.status(400).json({ 
         error: "Image trop petite",
-        size: buffer.length
+        size: buffer.length,
+        message: "L'image doit faire au moins 500 octets. Utilisez une vraie image (minimum 100x100 pixels)."
       });
     }
     
