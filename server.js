@@ -14,8 +14,8 @@ const EMAIL_FROM_NAME = "Administration STS";
 const EMAIL_FROM = "administration.STS@avocarbon.com";
 
 /* ========================= MIDDLEWARES ========================= */
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "50mb" })); // Augmenté pour les images
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 // CORS plus permissif pour ChatGPT
 app.use(
@@ -59,7 +59,7 @@ function generatePDF(content) {
       const doc = new PDFDocument({
         margin: 50,
         size: "A4",
-        bufferPages: true, // IMPORTANT: Active le buffer des pages
+        bufferPages: true,
         info: { Title: content.title, Author: "Assistant GPT", Subject: content.title },
       });
 
@@ -104,8 +104,68 @@ function generatePDF(content) {
           
           doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(`${index + 1}. ${section.title}`);
           doc.moveDown(0.5);
-          doc.fontSize(11).font("Helvetica").fillColor("#374151")
-            .text(section.content, { align: "justify", lineGap: 3 });
+          
+          // Contenu texte
+          if (section.content) {
+            doc.fontSize(11).font("Helvetica").fillColor("#374151")
+              .text(section.content, { align: "justify", lineGap: 3 });
+            doc.moveDown(1);
+          }
+          
+          // Image (si présente)
+          if (section.image) {
+            try {
+              // Extraire les données base64
+              let imageBuffer;
+              if (section.image.startsWith('data:')) {
+                // Format: data:image/png;base64,iVBORw0KG...
+                const base64Data = section.image.split(',')[1] || section.image.split(',')[0];
+                imageBuffer = Buffer.from(base64Data, 'base64');
+              } else {
+                // Base64 pur
+                imageBuffer = Buffer.from(section.image, 'base64');
+              }
+              
+              // Calculer les dimensions
+              const maxWidth = doc.page.width - 100; // Marges
+              const maxHeight = 300; // Hauteur max de l'image
+              
+              // Vérifier si on a assez d'espace, sinon nouvelle page
+              if (doc.y > doc.page.height - maxHeight - 100) {
+                doc.addPage();
+              }
+              
+              // Options d'image
+              const imageOptions = {
+                fit: [maxWidth, maxHeight],
+                align: 'center',
+                valign: 'center'
+              };
+              
+              // Ajouter l'image
+              doc.image(imageBuffer, {
+                ...imageOptions,
+                x: (doc.page.width - maxWidth) / 2,
+                y: doc.y
+              });
+              
+              doc.moveDown(2);
+              
+              // Légende (si présente)
+              if (section.imageCaption) {
+                doc.fontSize(9).fillColor("#6b7280").font("Helvetica-Oblique")
+                  .text(section.imageCaption, { align: "center" });
+                doc.moveDown(1);
+              }
+              
+            } catch (imgError) {
+              console.error("Erreur chargement image:", imgError);
+              doc.fontSize(10).fillColor("#ef4444")
+                .text("⚠️ Erreur lors du chargement de l'image", { align: "center" });
+              doc.moveDown(1);
+            }
+          }
+          
           doc.moveDown(1.5);
         });
       }
@@ -122,16 +182,14 @@ function generatePDF(content) {
           .text(content.conclusion, { align: "justify", lineGap: 3 });
       }
 
-      // SOLUTION: Ajouter les numéros de page AVANT doc.end()
+      // Numéros de page
       const range = doc.bufferedPageRange();
       
       for (let i = 0; i < range.count; i++) {
         doc.switchToPage(i);
         
-        // Sauvegarder la position actuelle
         const oldY = doc.y;
         
-        // Positionner en bas de page
         doc.fontSize(8).fillColor("#9ca3af");
         doc.text(
           `Page ${i + 1} sur ${range.count}`,
@@ -144,7 +202,6 @@ function generatePDF(content) {
           }
         );
         
-        // Restaurer la position si ce n'est pas la dernière page
         if (i < range.count - 1) {
           doc.switchToPage(i);
           doc.y = oldY;
