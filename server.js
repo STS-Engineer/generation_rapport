@@ -5,6 +5,16 @@ const PDFDocument = require("pdfkit");
 const nodemailer = require("nodemailer");
 const cors = require("cors");
 
+// Chargement paresseux de node-fetch (évite l'erreur si non installé pour les cas sans URL)
+let fetchFn = null;
+async function getFetch() {
+  if (!fetchFn) {
+    const mod = await import("node-fetch");
+    fetchFn = mod.default;
+  }
+  return fetchFn;
+}
+
 const app = express();
 
 /* ========================= CONFIG FIXE ========================= */
@@ -53,13 +63,73 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-function generatePDF(content) {
-  return new Promise((resolve, reject) => {
+const ALLOWED_MIMES = new Set(["image/png", "image/jpeg"]);
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB
+
+function dataUrlToBuffer(dataUrl) {
+  const m = /^data:(image\/png|image\/jpeg);base64,(.+)$/i.exec(dataUrl || "");
+  if (!m) throw new Error("dataUrl invalide ou non supporté");
+  const [, mime, base64] = m;
+  const buf = Buffer.from(base64, "base64");
+  if (buf.length > MAX_IMAGE_BYTES) throw new Error("Image trop volumineuse (>5MB)");
+  return { buffer: buf, mime: mime.toLowerCase() };
+}
+
+async function imageSourceToBuffer(img) {
+  // Priorité: data -> dataUrl -> url
+  if (img?.data) {
+    const mime = (img.mime || "").toLowerCase();
+    if (!ALLOWED_MIMES.has(mime)) throw new Error("MIME non supporté (PNG/JPEG requis)");
+    const buffer = Buffer.from(img.data, "base64");
+    if (buffer.length > MAX_IMAGE_BYTES) throw new Error("Image trop volumineuse (>5MB)");
+    return { buffer, mime };
+  }
+  if (img?.dataUrl) {
+    return dataUrlToBuffer(img.dataUrl);
+  }
+  if (img?.url) {
+    const fetch = await getFetch();
+    const r = await fetch(img.url);
+    if (!r.ok) throw new Error(`Téléchargement image échoué (${r.status})`);
+    const mime = (r.headers.get("content-type") || "").split(";")[0].toLowerCase();
+    if (!ALLOWED_MIMES.has(mime)) throw new Error("URL: MIME non supporté (PNG/JPEG requis)");
+    const buffer = Buffer.from(await r.arrayBuffer());
+    if (buffer.length > MAX_IMAGE_BYTES) throw new Error("Image trop volumineuse (>5MB)");
+    return { buffer, mime };
+  }
+  throw new Error("Aucune source image fournie (data/dataUrl/url)");
+}
+
+function drawAlignedImage(doc, buffer, opts = {}) {
+  const { fit, align = "left" } = opts;
+  const pageWidth = doc.page.width;
+  const margin = doc.page.margins.left; // = right
+  const usableWidth = pageWidth - margin * 2;
+
+  // Largeur supposée si fit absent
+  const fitW = Array.isArray(fit) && fit.length === 2 ? fit[0] : Math.min(usableWidth, 400);
+  const drawOpts = Array.isArray(fit) && fit.length === 2 ? { fit } : { fit: [fitW, fitW] };
+
+  let x = margin;
+  if (align === "center") {
+    x = margin + (usableWidth - drawOpts.fit[0]) / 2;
+    if (x < margin) x = margin;
+  } else if (align === "right") {
+    x = pageWidth - margin - drawOpts.fit[0];
+    if (x < margin) x = margin;
+  }
+
+  doc.image(buffer, x, doc.y, drawOpts);
+  doc.moveDown(0.5);
+}
+
+async function generatePDF(content) {
+  return new Promise(async (resolve, reject) => {
     try {
       const doc = new PDFDocument({
         margin: 50,
         size: "A4",
-        bufferPages: true, // IMPORTANT: Active le buffer des pages
+        bufferPages: true,
         info: { Title: content.title, Author: "Assistant GPT", Subject: content.title },
       });
 
@@ -68,83 +138,90 @@ function generatePDF(content) {
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
 
-      // En-tête
+      // ===== En-tête (Titre + trait)
       doc.fontSize(26).font("Helvetica-Bold").fillColor("#1e40af").text(content.title, { align: "center" });
       doc.moveDown(0.5);
       doc.strokeColor("#3b82f6").lineWidth(2).moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
       doc.moveDown();
 
-      // Date
-      doc
-        .fontSize(10)
-        .fillColor("#6b7280")
-        .font("Helvetica")
-        .text(
-          `Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`,
-          { align: "right" }
-        );
+      // ===== Date
+      doc.fontSize(10).fillColor("#6b7280").font("Helvetica").text(
+        `Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`,
+        { align: "right" }
+      );
       doc.moveDown(2);
 
-      // Introduction
+      // ===== Introduction
       if (content.introduction) {
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Introduction");
         doc.moveDown(0.5);
         doc.fontSize(11).font("Helvetica").fillColor("#374151")
           .text(content.introduction, { align: "justify", lineGap: 3 });
-        doc.moveDown(2);
+        doc.moveDown(1.5);
       }
 
-      // Sections
+      // ===== Sections (avec support d'image par section)
       if (Array.isArray(content.sections)) {
-        content.sections.forEach((section, index) => {
-          // Vérifier si besoin d'une nouvelle page
-          if (doc.y > doc.page.height - 150) {
-            doc.addPage();
-          }
-          
-          doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(`${index + 1}. ${section.title}`);
+        for (let i = 0; i < content.sections.length; i++) {
+          const section = content.sections[i];
+          if (doc.y > doc.page.height - 200) doc.addPage();
+
+          doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(`${i + 1}. ${section.title}`);
           doc.moveDown(0.5);
           doc.fontSize(11).font("Helvetica").fillColor("#374151")
             .text(section.content, { align: "justify", lineGap: 3 });
-          doc.moveDown(1.5);
-        });
+          doc.moveDown(0.8);
+
+          // --- NEW: image de section si fournie
+          if (section.image) {
+            if (doc.y > doc.page.height - 220) doc.addPage();
+            try {
+              const { buffer } = await imageSourceToBuffer(section.image);
+              drawAlignedImage(doc, buffer, {
+                fit: section.image.fit,
+                align: section.image.align || "left"
+              });
+              if (section.image.caption) {
+                const align = section.image.align === "right" ? "right" :
+                              section.image.align === "center" ? "center" : "left";
+                doc.fontSize(9).fillColor("#6b7280").text(section.image.caption, { align });
+                doc.moveDown(0.8);
+              } else {
+                doc.moveDown(0.5);
+              }
+            } catch (e) {
+              console.warn("Section image ignorée:", e.message);
+              doc.fontSize(9).fillColor("#b91c1c")
+                .text("⚠️ Image de la section non insérée (format ou source invalide).");
+              doc.moveDown(0.6);
+            }
+          }
+
+          doc.moveDown(0.9);
+        }
       }
 
-      // Conclusion
+      // ===== Conclusion
       if (content.conclusion) {
-        if (doc.y > doc.page.height - 150) {
-          doc.addPage();
-        }
-        
+        if (doc.y > doc.page.height - 150) doc.addPage();
         doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Conclusion");
         doc.moveDown(0.5);
         doc.fontSize(11).font("Helvetica").fillColor("#374151")
           .text(content.conclusion, { align: "justify", lineGap: 3 });
       }
 
-      // SOLUTION: Ajouter les numéros de page AVANT doc.end()
+      // ===== Pagination (numéros de page)
       const range = doc.bufferedPageRange();
-      
       for (let i = 0; i < range.count; i++) {
         doc.switchToPage(i);
-        
-        // Sauvegarder la position actuelle
         const oldY = doc.y;
-        
-        // Positionner en bas de page
         doc.fontSize(8).fillColor("#9ca3af");
         doc.text(
           `Page ${i + 1} sur ${range.count}`,
           50,
           doc.page.height - 50,
-          { 
-            align: "center",
-            lineBreak: false,
-            width: doc.page.width - 100
-          }
+          { align: "center", lineBreak: false, width: doc.page.width - 100 }
         );
-        
-        // Restaurer la position si ce n'est pas la dernière page
         if (i < range.count - 1) {
           doc.switchToPage(i);
           doc.y = oldY;
@@ -197,6 +274,8 @@ app.post("/api/generate-and-send", async (req, res) => {
         error: "Structure du rapport invalide",
       });
     }
+
+    // NOTE: la présence d'une image dans une section est optionnelle et validée au moment du rendu.
 
     const pdfBuffer = await generatePDF(reportContent);
     const pdfName = `rapport_${reportContent.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf`;
@@ -255,7 +334,7 @@ app.get("/health", (_req, res) => {
 app.get("/", (_req, res) => {
   res.json({
     name: "GPT PDF Email API",
-    version: "1.0.0",
+    version: "1.1.0",
     status: "running",
     endpoints: {
       health: "GET /health",
