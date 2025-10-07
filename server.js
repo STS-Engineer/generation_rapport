@@ -117,13 +117,28 @@ function generatePDF(content) {
             try {
               // Extraire les données base64
               let imageBuffer;
-              if (section.image.startsWith('data:')) {
+              let base64Data = section.image;
+              
+              // Nettoyer les données base64
+              if (base64Data.startsWith('data:')) {
                 // Format: data:image/png;base64,iVBORw0KG...
-                const base64Data = section.image.split(',')[1] || section.image.split(',')[0];
-                imageBuffer = Buffer.from(base64Data, 'base64');
-              } else {
-                // Base64 pur
-                imageBuffer = Buffer.from(section.image, 'base64');
+                base64Data = base64Data.split(',')[1];
+              }
+              
+              // Supprimer les espaces blancs et caractères invisibles
+              base64Data = base64Data.replace(/\s/g, '');
+              
+              // Vérifier que c'est du base64 valide
+              if (!/^[A-Za-z0-9+/=]+$/.test(base64Data)) {
+                throw new Error("Format base64 invalide");
+              }
+              
+              // Créer le buffer
+              imageBuffer = Buffer.from(base64Data, 'base64');
+              
+              // Vérifier la taille minimale (un vrai fichier image)
+              if (imageBuffer.length < 100) {
+                throw new Error("Image trop petite ou corrompue");
               }
               
               // Calculer les dimensions
@@ -135,21 +150,24 @@ function generatePDF(content) {
                 doc.addPage();
               }
               
-              // Options d'image
-              const imageOptions = {
-                fit: [maxWidth, maxHeight],
-                align: 'center',
-                valign: 'center'
-              };
+              // Sauvegarder la position Y avant l'image
+              const startY = doc.y;
               
               // Ajouter l'image
               doc.image(imageBuffer, {
-                ...imageOptions,
-                x: (doc.page.width - maxWidth) / 2,
-                y: doc.y
+                fit: [maxWidth, maxHeight],
+                align: 'center'
               });
               
-              doc.moveDown(2);
+              // Calculer combien d'espace l'image a pris
+              const imageHeight = doc.y - startY;
+              
+              // S'assurer qu'on avance après l'image
+              if (imageHeight < 50) {
+                doc.moveDown(3);
+              } else {
+                doc.moveDown(1);
+              }
               
               // Légende (si présente)
               if (section.imageCaption) {
@@ -159,9 +177,11 @@ function generatePDF(content) {
               }
               
             } catch (imgError) {
-              console.error("Erreur chargement image:", imgError);
+              console.error("Erreur chargement image:", imgError.message);
               doc.fontSize(10).fillColor("#ef4444")
                 .text("⚠️ Erreur lors du chargement de l'image", { align: "center" });
+              doc.fontSize(8).fillColor("#9ca3af")
+                .text(`(${imgError.message})`, { align: "center" });
               doc.moveDown(1);
             }
           }
@@ -297,6 +317,59 @@ app.post("/api/generate-and-send", async (req, res) => {
       error: "Erreur lors du traitement",
       details: err.message,
     });
+  }
+});
+
+app.post("/api/test-image", async (req, res) => {
+  try {
+    const { imageData } = req.body;
+    
+    if (!imageData) {
+      return res.status(400).json({ error: "imageData requis" });
+    }
+    
+    let base64Data = imageData;
+    
+    // Nettoyer
+    if (base64Data.startsWith('data:')) {
+      base64Data = base64Data.split(',')[1];
+    }
+    base64Data = base64Data.replace(/\s/g, '');
+    
+    // Vérifier format
+    if (!/^[A-Za-z0-9+/=]+$/.test(base64Data)) {
+      return res.status(400).json({ 
+        error: "Format base64 invalide",
+        details: "Contient des caractères non base64"
+      });
+    }
+    
+    // Créer buffer
+    const buffer = Buffer.from(base64Data, 'base64');
+    
+    // Vérifier taille
+    if (buffer.length < 100) {
+      return res.status(400).json({ 
+        error: "Image trop petite",
+        size: buffer.length
+      });
+    }
+    
+    // Détecter le type
+    let type = "inconnu";
+    if (buffer[0] === 0xFF && buffer[1] === 0xD8) type = "JPEG";
+    else if (buffer[0] === 0x89 && buffer[1] === 0x50) type = "PNG";
+    else if (buffer[0] === 0x47 && buffer[1] === 0x49) type = "GIF";
+    
+    return res.json({
+      success: true,
+      imageType: type,
+      size: `${(buffer.length / 1024).toFixed(2)} KB`,
+      dimensions: "OK - Peut être traité par PDFKit"
+    });
+    
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
