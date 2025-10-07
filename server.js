@@ -136,9 +136,9 @@ function generatePDF(content) {
               // Créer le buffer
               imageBuffer = Buffer.from(base64Data, 'base64');
               
-              // Vérifier la taille minimale (un vrai fichier image)
-              if (imageBuffer.length < 100) {
-                throw new Error("Image trop petite ou corrompue");
+              // Vérifier la taille minimale (un vrai fichier image doit faire au moins 500 octets)
+              if (imageBuffer.length < 500) {
+                throw new Error(`Image trop petite (${imageBuffer.length} octets). Minimum 500 octets requis.`);
               }
               
               // Calculer les dimensions
