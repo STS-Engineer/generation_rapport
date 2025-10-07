@@ -14,10 +14,9 @@ const EMAIL_FROM_NAME = "Administration STS";
 const EMAIL_FROM = "administration.STS@avocarbon.com";
 
 /* ========================= MIDDLEWARES ========================= */
-app.use(express.json({ limit: "50mb" })); // Augmenté pour les images
+app.use(express.json({ limit: "50mb" })); // payload image volumineux
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// CORS plus permissif pour ChatGPT
 app.use(
   cors({
     origin: true,
@@ -31,11 +30,8 @@ app.use(
     ],
   })
 );
-
-// Préflight pour toutes les routes
 app.options("*", cors());
 
-// Log simple
 app.use((req, _res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
@@ -60,87 +56,113 @@ function isValidEmail(email) {
 }
 
 /**
- * Normalise et valide une Data URL base64 (ou une chaîne base64 simple).
- * - Nettoie BOM/zero-width/espaces
- * - Convertit la variante URL-safe (-, _) en standard (+, /)
- * - Ajoute le padding manquant (=)
- * - Retourne { buffer, mime }
- * Lève des erreurs explicites si invalide.
+ * Normalise & valide une Data URL base64 (ou chaîne base64 brute).
+ * - Retire BOM/zero-width/CRLF
+ * - Décode %xx si présent (cas %2B/%2F)
+ * - Convertit espaces -> '+', base64url (-,_) -> standard (+,/)
+ * - Ajoute le padding manquant (=) pour longueur %4
+ * - Vérifie caractères autorisés et taille minimale
+ * - Détecte le type via magic numbers
+ * Retourne { buffer, mime }
  */
-function sanitizeBase64DataUrl(input) {
+function sanitizeBase64DataUrl(input, opts = { debug: false }) {
   if (typeof input !== "string") throw new Error("image doit être une chaîne");
 
-  // Trim et suppression BOM + invisibles fréquents
   let s = input
     .trim()
     .replace(/^\uFEFF/, "") // BOM
-    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, ""); // zero-width & cie
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, ""); // zero-width
 
-  // Si Data URL, extraire header/payload
   let mime = null;
   if (s.startsWith("data:")) {
     const comma = s.indexOf(",");
     if (comma === -1) throw new Error("Data URL invalide (pas de virgule)");
     const header = s.slice(5, comma); // après "data:"
     s = s.slice(comma + 1); // payload
-
-    // Exemple header: "image/png;base64"
     const parts = header.split(";");
     mime = parts[0] || null;
-
-    // Vérifier que c'est bien du base64 (et pas ;utf8, etc.)
     const isBase64Declared = parts.some((p) => p.toLowerCase() === "base64");
     if (!isBase64Declared) {
       throw new Error("Le Data URL n’est pas en base64 (ex: ;utf8).");
     }
   }
 
-  // Retirer tous les espaces / retours (y compris encodages bizarres)
-  s = s.replace(/\s+/g, "");
+  // Si on voit des %xx (url-encodé), décoder
+  if (/%[0-9A-Fa-f]{2}/.test(s)) {
+    try {
+      s = decodeURIComponent(s);
+    } catch {
+      // ignore si invalide
+    }
+  }
 
-  // Normaliser la variante URL-safe -> standard
+  // Si payload a été url-encodé via form-urlencoded, '+' est devenu espace : on le rétablit
+  s = s.replace(/ /g, "+");
+
+  // Supprimer CR/LF/TAB
+  s = s.replace(/[\r\n\t]/g, "");
+
+  // base64url -> base64 standard
   s = s.replace(/-/g, "+").replace(/_/g, "/");
 
-  // Ajouter le padding manquant à multiple de 4
+  // Padding à multiple de 4
   const mod4 = s.length % 4;
   if (mod4 === 2) s += "==";
   else if (mod4 === 3) s += "=";
   else if (mod4 === 1) throw new Error("Longueur base64 invalide");
 
-  // Vérifier caractères autorisés
+  // Vérifier alphabet base64
   if (!/^[A-Za-z0-9+/=]+$/.test(s)) {
-    throw new Error("Contient des caractères non base64");
+    const m = s.match(/[^A-Za-z0-9+/=]/);
+    const pos = m ? s.indexOf(m[0]) : -1;
+    throw new Error(
+      pos >= 0
+        ? `Contient un caractère non base64 à l'index ${pos} (code ${s.charCodeAt(
+            pos
+          )})`
+        : "Contient des caractères non base64"
+    );
   }
 
-  // Décoder
   const buf = Buffer.from(s, "base64");
-
-  // Sanity check taille minimale
   if (buf.length < 500) {
     throw new Error(
       `Image trop petite (${buf.length} octets). Minimum 500 octets requis.`
     );
   }
 
-  // Détection simple du type (magic numbers)
-  let type = "unknown";
-  if (buf[0] === 0xff && buf[1] === 0xd8) type = "image/jpeg";
+  // Détection type
+  let detected = "unknown";
+  if (buf[0] === 0xff && buf[1] === 0xd8) detected = "image/jpeg";
   else if (
     buf[0] === 0x89 &&
     buf[1] === 0x50 &&
     buf[2] === 0x4e &&
     buf[3] === 0x47
   )
-    type = "image/png";
+    detected = "image/png";
   else if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46)
-    type = "image/gif";
+    detected = "image/gif";
   else if (
     buf.slice(0, 4).toString() === "RIFF" &&
     buf.slice(8, 12).toString() === "WEBP"
   )
-    type = "image/webp";
+    detected = "image/webp";
 
-  return { buffer: buf, mime: mime || type };
+  if (opts.debug) {
+    console.log(
+      "[sanitizeBase64DataUrl] len:",
+      s.length,
+      "mod4:",
+      mod4,
+      "mime:",
+      mime,
+      "detected:",
+      detected
+    );
+  }
+
+  return { buffer: buf, mime: mime || detected };
 }
 
 function generatePDF(content) {
@@ -211,10 +233,7 @@ function generatePDF(content) {
       // Sections
       if (Array.isArray(content.sections)) {
         content.sections.forEach((section, index) => {
-          // Nouvelle page si peu d'espace
-          if (doc.y > doc.page.height - 150) {
-            doc.addPage();
-          }
+          if (doc.y > doc.page.height - 150) doc.addPage();
 
           doc
             .fontSize(14)
@@ -223,7 +242,6 @@ function generatePDF(content) {
             .text(`${index + 1}. ${section.title}`);
           doc.moveDown(0.5);
 
-          // Contenu texte
           if (section.content) {
             doc
               .fontSize(11)
@@ -233,32 +251,25 @@ function generatePDF(content) {
             doc.moveDown(1);
           }
 
-          // Image (si présente)
+          // Image
           if (section.image) {
             try {
               const { buffer, mime } = sanitizeBase64DataUrl(section.image);
 
-              // PDFKit supporte JPEG & PNG
+              // PDFKit supporte JPEG & PNG uniquement
               if (mime !== "image/jpeg" && mime !== "image/png") {
                 throw new Error(
                   `Type d'image non supporté par PDFKit (${mime}). Utilisez JPEG ou PNG.`
                 );
               }
 
-              const maxWidth = doc.page.width - 100; // marges
+              const maxWidth = doc.page.width - 100;
               const maxHeight = 300;
 
-              if (doc.y > doc.page.height - maxHeight - 100) {
-                doc.addPage();
-              }
+              if (doc.y > doc.page.height - maxHeight - 100) doc.addPage();
 
               const startY = doc.y;
-
-              doc.image(buffer, {
-                fit: [maxWidth, maxHeight],
-                align: "center",
-              });
-
+              doc.image(buffer, { fit: [maxWidth, maxHeight], align: "center" });
               const imageHeight = doc.y - startY;
 
               if (imageHeight < 50) doc.moveDown(3);
@@ -294,10 +305,7 @@ function generatePDF(content) {
 
       // Conclusion
       if (content.conclusion) {
-        if (doc.y > doc.page.height - 150) {
-          doc.addPage();
-        }
-
+        if (doc.y > doc.page.height - 150) doc.addPage();
         doc
           .fontSize(16)
           .font("Helvetica-Bold")
@@ -311,21 +319,17 @@ function generatePDF(content) {
           .text(content.conclusion, { align: "justify", lineGap: 3 });
       }
 
-      // Numéros de page
+      // Pagination
       const range = doc.bufferedPageRange();
-
       for (let i = 0; i < range.count; i++) {
         doc.switchToPage(i);
-
         const oldY = doc.y;
-
         doc.fontSize(8).fillColor("#9ca3af");
         doc.text(`Page ${i + 1} sur ${range.count}`, 50, doc.page.height - 50, {
           align: "center",
           lineBreak: false,
           width: doc.page.width - 100,
         });
-
         if (i < range.count - 1) {
           doc.switchToPage(i);
           doc.y = oldY;
@@ -432,16 +436,17 @@ app.post("/api/generate-and-send", async (req, res) => {
   }
 });
 
+/**
+ * Validation d'une image base64 (diagnostic rapide)
+ */
 app.post("/api/test-image", (req, res) => {
   try {
-    const { imageData } = req.body;
+    const { imageData } = req.body || {};
     if (!imageData) {
       return res.status(400).json({ error: "imageData requis" });
     }
 
     const { buffer, mime } = sanitizeBase64DataUrl(imageData);
-
-    // Indiquer si PDFKit saura l’utiliser
     const pdfkitOk = mime === "image/jpeg" || mime === "image/png";
 
     return res.json({
@@ -453,6 +458,37 @@ app.post("/api/test-image", (req, res) => {
     });
   } catch (err) {
     return res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * Endpoint de debug pour voir où ça casse si besoin
+ */
+app.post("/api/debug/base64", (req, res) => {
+  try {
+    const { data } = req.body || {};
+    if (!data) return res.status(400).json({ error: "champ 'data' requis" });
+
+    try {
+      const { buffer, mime } = sanitizeBase64DataUrl(data, { debug: true });
+      return res.json({
+        ok: true,
+        mime,
+        size: buffer.length,
+        head: buffer.slice(0, 8).toString("hex"),
+      });
+    } catch (e) {
+      const s = String(data);
+      return res.status(400).json({
+        ok: false,
+        error: e.message,
+        sampleStart: s.slice(0, 80),
+        sampleEnd: s.slice(-40),
+        length: s.length,
+      });
+    }
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -474,6 +510,7 @@ app.get("/", (_req, res) => {
       health: "GET /health",
       generateAndSend: "POST /api/generate-and-send",
       testImage: "POST /api/test-image",
+      debugBase64: "POST /api/debug/base64",
     },
   });
 });
@@ -495,7 +532,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 API démarrée sur port ${PORT}`);
 });
 
-// Handlers process
 process.on("unhandledRejection", (r) => console.error("Unhandled Rejection:", r));
 process.on("uncaughtException", (e) => {
   console.error("Uncaught Exception:", e);
