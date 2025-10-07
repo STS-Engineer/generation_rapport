@@ -31,7 +31,7 @@ app.use(
 app.options("*", cors());
 
 app.use((req, _res, next) => {
-  console.log(${new Date().toISOString()} - ${req.method} ${req.path});
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
   next();
 });
 
@@ -80,7 +80,7 @@ function generatePDF(content) {
         .fillColor("#6b7280")
         .font("Helvetica")
         .text(
-          Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })},
+          `Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`,
           { align: "right" }
         );
       doc.moveDown(2);
@@ -102,7 +102,7 @@ function generatePDF(content) {
             doc.addPage();
           }
           
-          doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(${index + 1}. ${section.title});
+          doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(`${index + 1}. ${section.title}`);
           doc.moveDown(0.5);
           
           // Contenu texte
@@ -138,7 +138,7 @@ function generatePDF(content) {
               
               // Vérifier la taille minimale (un vrai fichier image doit faire au moins 500 octets)
               if (imageBuffer.length < 500) {
-                throw new Error(Image trop petite (${imageBuffer.length} octets). Minimum 500 octets requis.);
+                throw new Error(`Image trop petite (${imageBuffer.length} octets). Minimum 500 octets requis.`);
               }
               
               // Calculer les dimensions
@@ -181,7 +181,7 @@ function generatePDF(content) {
               doc.fontSize(10).fillColor("#ef4444")
                 .text("⚠️ Erreur lors du chargement de l'image", { align: "center" });
               doc.fontSize(8).fillColor("#9ca3af")
-                .text((${imgError.message}), { align: "center" });
+                .text(`(${imgError.message})`, { align: "center" });
               doc.moveDown(1);
             }
           }
@@ -212,7 +212,7 @@ function generatePDF(content) {
         
         doc.fontSize(8).fillColor("#9ca3af");
         doc.text(
-          Page ${i + 1} sur ${range.count},
+          `Page ${i + 1} sur ${range.count}`,
           50,
           doc.page.height - 50,
           { 
@@ -276,9 +276,9 @@ app.post("/api/generate-and-send", async (req, res) => {
     }
 
     const pdfBuffer = await generatePDF(reportContent);
-    const pdfName = rapport_${reportContent.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf;
+    const pdfName = `rapport_${reportContent.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf`;
 
-    const html = 
+    const html = `
       <!DOCTYPE html>
       <html>
         <body style="font-family: Arial, sans-serif; line-height:1.6; color:#111827;">
@@ -292,11 +292,11 @@ app.post("/api/generate-and-send", async (req, res) => {
           <p style="color:#6b7280;font-size:12px">© ${new Date().getFullYear()} ${EMAIL_FROM_NAME}</p>
         </body>
       </html>
-    ;
+    `;
 
     await sendEmailWithPdf({
       to: email,
-      subject: Rapport : ${reportContent.title},
+      subject: `Rapport : ${reportContent.title}`,
       messageHtml: html,
       pdfBuffer,
       pdfFilename: pdfName,
@@ -307,7 +307,7 @@ app.post("/api/generate-and-send", async (req, res) => {
       message: "Rapport généré et envoyé avec succès",
       details: {
         email,
-        pdfSize: ${(pdfBuffer.length / 1024).toFixed(2)} KB,
+        pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
       },
     });
   } catch (err) {
@@ -365,7 +365,7 @@ app.post("/api/test-image", async (req, res) => {
     return res.json({
       success: true,
       imageType: type,
-      size: ${(buffer.length / 1024).toFixed(2)} KB,
+      size: `${(buffer.length / 1024).toFixed(2)} KB`,
       dimensions: "OK - Peut être traité par PDFKit"
     });
     
@@ -405,7 +405,7 @@ app.use((err, _req, res, _next) => {
 /* ============================ START ============================ */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(🚀 API démarrée sur port ${PORT});
+  console.log(`🚀 API démarrée sur port ${PORT}`);
 });
 
 process.on("unhandledRejection", (r) => console.error("Unhandled Rejection:", r));
