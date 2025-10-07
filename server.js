@@ -9,7 +9,7 @@ const app = express();
 
 /* ========================= CONFIG FIXE ========================= */
 const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
-const SMTP_PORT = 25;
+the const SMTP_PORT = 25;
 const EMAIL_FROM_NAME = "Administration STS";
 const EMAIL_FROM = "administration.STS@avocarbon.com";
 
@@ -59,13 +59,17 @@ function isValidEmail(email) {
  * Normalise & valide une Data URL base64 (ou chaîne base64 brute).
  * - Retire BOM/zero-width/CRLF
  * - Décode %xx si présent (cas %2B/%2F)
+ * - Décode les entités HTML (&amp; &#43; &#x2F; …)
  * - Convertit espaces -> '+', base64url (-,_) -> standard (+,/)
  * - Ajoute le padding manquant (=) pour longueur %4
- * - Vérifie caractères autorisés et taille minimale
+ * - Vérifie alphabet base64, avec mode “lenient” (suppression limitée de bruit)
  * - Détecte le type via magic numbers
  * Retourne { buffer, mime }
  */
-function sanitizeBase64DataUrl(input, opts = { debug: false }) {
+function sanitizeBase64DataUrl(
+  input,
+  opts = { debug: false, lenient: true, maxDropRatio: 0.01, maxDropAbs: 64 }
+) {
   if (typeof input !== "string") throw new Error("image doit être une chaîne");
 
   let s = input
@@ -73,57 +77,85 @@ function sanitizeBase64DataUrl(input, opts = { debug: false }) {
     .replace(/^\uFEFF/, "") // BOM
     .replace(/[\u200B-\u200D\u2060\uFEFF]/g, ""); // zero-width
 
+  // 1) Si Data URL, extraire le payload et vérifier ;base64
   let mime = null;
   if (s.startsWith("data:")) {
     const comma = s.indexOf(",");
     if (comma === -1) throw new Error("Data URL invalide (pas de virgule)");
-    const header = s.slice(5, comma); // après "data:"
-    s = s.slice(comma + 1); // payload
+    const header = s.slice(5, comma);
+    s = s.slice(comma + 1);
     const parts = header.split(";");
     mime = parts[0] || null;
     const isBase64Declared = parts.some((p) => p.toLowerCase() === "base64");
-    if (!isBase64Declared) {
+    if (!isBase64Declared)
       throw new Error("Le Data URL n’est pas en base64 (ex: ;utf8).");
-    }
   }
 
-  // Si on voit des %xx (url-encodé), décoder
+  // 2) Si c’est url-encodé, décoder (%2B/%2F/…)
   if (/%[0-9A-Fa-f]{2}/.test(s)) {
     try {
       s = decodeURIComponent(s);
-    } catch {
-      // ignore si invalide
-    }
+    } catch {}
   }
 
-  // Si payload a été url-encodé via form-urlencoded, '+' est devenu espace : on le rétablit
+  // 3) Décodage d’entités HTML (&amp; &#43; &#x2B; etc.)
+  s = s.replace(/&(#x?[0-9A-Fa-f]+|amp|lt|gt|quot|apos);/g, (_, ent) => {
+    const low = String(ent).toLowerCase();
+    if (low === "amp") return "&";
+    if (low === "lt") return "<";
+    if (low === "gt") return ">";
+    if (low === "quot") return '"';
+    if (low === "apos") return "'";
+    if (low.startsWith("#x")) {
+      const cp = parseInt(low.slice(2), 16);
+      return Number.isFinite(cp) ? String.fromCharCode(cp) : "";
+    } else if (low.startsWith("#")) {
+      const cp = parseInt(low.slice(1), 10);
+      return Number.isFinite(cp) ? String.fromCharCode(cp) : "";
+    }
+    return "";
+  });
+
+  // 4) Form-urlencoded : les '+' deviennent des espaces → reconvertir
   s = s.replace(/ /g, "+");
 
-  // Supprimer CR/LF/TAB
+  // 5) Supprimer CR/LF/TAB
   s = s.replace(/[\r\n\t]/g, "");
 
-  // base64url -> base64 standard
+  // 6) base64url -> base64 standard
   s = s.replace(/-/g, "+").replace(/_/g, "/");
 
-  // Padding à multiple de 4
+  // 7) Padding à multiple de 4
   const mod4 = s.length % 4;
   if (mod4 === 2) s += "==";
   else if (mod4 === 3) s += "=";
   else if (mod4 === 1) throw new Error("Longueur base64 invalide");
 
-  // Vérifier alphabet base64
-  if (!/^[A-Za-z0-9+/=]+$/.test(s)) {
-    const m = s.match(/[^A-Za-z0-9+/=]/);
-    const pos = m ? s.indexOf(m[0]) : -1;
-    throw new Error(
-      pos >= 0
-        ? `Contient un caractère non base64 à l'index ${pos} (code ${s.charCodeAt(
-            pos
-          )})`
-        : "Contient des caractères non base64"
-    );
+  // 8) Vérif alphabet base64 (lenient: suppression limitée de bruit)
+  const illegal = s.match(/[^A-Za-z0-9+/=]/g);
+  if (illegal) {
+    if (!opts.lenient) {
+      const pos = s.search(/[^A-Za-z0-9+/=]/);
+      throw new Error(
+        `Contient un caractère non base64 à l'index ${pos} (code ${s.charCodeAt(
+          pos
+        )})`
+      );
+    }
+    const before = s.length;
+    s = s.replace(/[^A-Za-z0-9+/=]/g, "");
+    const dropped = before - s.length;
+    const ratio = dropped / before;
+    if (dropped > (opts.maxDropAbs || 64) && ratio > (opts.maxDropRatio || 0.01)) {
+      throw new Error(
+        `Trop de caractères non base64 supprimés (${dropped}, ${Math.round(
+          ratio * 100
+        )}%). Vérifiez l'encodage amont.`
+      );
+    }
   }
 
+  // 9) Décodage base64
   const buf = Buffer.from(s, "base64");
   if (buf.length < 500) {
     throw new Error(
@@ -131,7 +163,7 @@ function sanitizeBase64DataUrl(input, opts = { debug: false }) {
     );
   }
 
-  // Détection type
+  // 10) Détection type (magic numbers)
   let detected = "unknown";
   if (buf[0] === 0xff && buf[1] === 0xd8) detected = "image/jpeg";
   else if (
@@ -150,16 +182,12 @@ function sanitizeBase64DataUrl(input, opts = { debug: false }) {
     detected = "image/webp";
 
   if (opts.debug) {
-    console.log(
-      "[sanitizeBase64DataUrl] len:",
-      s.length,
-      "mod4:",
+    console.log("[sanitizeBase64DataUrl]", {
+      len: s.length,
       mod4,
-      "mime:",
       mime,
-      "detected:",
-      detected
-    );
+      detected,
+    });
   }
 
   return { buffer: buf, mime: mime || detected };
@@ -256,7 +284,7 @@ function generatePDF(content) {
             try {
               const { buffer, mime } = sanitizeBase64DataUrl(section.image);
 
-              // PDFKit supporte JPEG & PNG uniquement
+              // PDFKit supporte JPEG & PNG
               if (mime !== "image/jpeg" && mime !== "image/png") {
                 throw new Error(
                   `Type d'image non supporté par PDFKit (${mime}). Utilisez JPEG ou PNG.`
@@ -265,7 +293,6 @@ function generatePDF(content) {
 
               const maxWidth = doc.page.width - 100;
               const maxHeight = 300;
-
               if (doc.y > doc.page.height - maxHeight - 100) doc.addPage();
 
               const startY = doc.y;
