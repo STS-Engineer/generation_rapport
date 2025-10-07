@@ -9,31 +9,29 @@ const app = express();
 
 /* ========================= CONFIG FIXE ========================= */
 const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
-the const SMTP_PORT = 25;
+const SMTP_PORT = 25;
 const EMAIL_FROM_NAME = "Administration STS";
 const EMAIL_FROM = "administration.STS@avocarbon.com";
 
 /* ========================= MIDDLEWARES ========================= */
-app.use(express.json({ limit: "50mb" })); // payload image volumineux
+app.use(express.json({ limit: "50mb" })); // Augmenté pour les images
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
+// CORS plus permissif pour ChatGPT
 app.use(
   cors({
     origin: true,
     credentials: true,
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "openai-conversation-id",
-      "openai-ephemeral-user-id",
-    ],
+    allowedHeaders: ["Content-Type", "Authorization", "openai-conversation-id", "openai-ephemeral-user-id"],
   })
 );
+
+// Préflight pour toutes les routes
 app.options("*", cors());
 
 app.use((req, _res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  console.log(${new Date().toISOString()} - ${req.method} ${req.path});
   next();
 });
 
@@ -55,144 +53,6 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-/**
- * Normalise & valide une Data URL base64 (ou chaîne base64 brute).
- * - Retire BOM/zero-width/CRLF
- * - Décode %xx si présent (cas %2B/%2F)
- * - Décode les entités HTML (&amp; &#43; &#x2F; …)
- * - Convertit espaces -> '+', base64url (-,_) -> standard (+,/)
- * - Ajoute le padding manquant (=) pour longueur %4
- * - Vérifie alphabet base64, avec mode “lenient” (suppression limitée de bruit)
- * - Détecte le type via magic numbers
- * Retourne { buffer, mime }
- */
-function sanitizeBase64DataUrl(
-  input,
-  opts = { debug: false, lenient: true, maxDropRatio: 0.01, maxDropAbs: 64 }
-) {
-  if (typeof input !== "string") throw new Error("image doit être une chaîne");
-
-  let s = input
-    .trim()
-    .replace(/^\uFEFF/, "") // BOM
-    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, ""); // zero-width
-
-  // 1) Si Data URL, extraire le payload et vérifier ;base64
-  let mime = null;
-  if (s.startsWith("data:")) {
-    const comma = s.indexOf(",");
-    if (comma === -1) throw new Error("Data URL invalide (pas de virgule)");
-    const header = s.slice(5, comma);
-    s = s.slice(comma + 1);
-    const parts = header.split(";");
-    mime = parts[0] || null;
-    const isBase64Declared = parts.some((p) => p.toLowerCase() === "base64");
-    if (!isBase64Declared)
-      throw new Error("Le Data URL n’est pas en base64 (ex: ;utf8).");
-  }
-
-  // 2) Si c’est url-encodé, décoder (%2B/%2F/…)
-  if (/%[0-9A-Fa-f]{2}/.test(s)) {
-    try {
-      s = decodeURIComponent(s);
-    } catch {}
-  }
-
-  // 3) Décodage d’entités HTML (&amp; &#43; &#x2B; etc.)
-  s = s.replace(/&(#x?[0-9A-Fa-f]+|amp|lt|gt|quot|apos);/g, (_, ent) => {
-    const low = String(ent).toLowerCase();
-    if (low === "amp") return "&";
-    if (low === "lt") return "<";
-    if (low === "gt") return ">";
-    if (low === "quot") return '"';
-    if (low === "apos") return "'";
-    if (low.startsWith("#x")) {
-      const cp = parseInt(low.slice(2), 16);
-      return Number.isFinite(cp) ? String.fromCharCode(cp) : "";
-    } else if (low.startsWith("#")) {
-      const cp = parseInt(low.slice(1), 10);
-      return Number.isFinite(cp) ? String.fromCharCode(cp) : "";
-    }
-    return "";
-  });
-
-  // 4) Form-urlencoded : les '+' deviennent des espaces → reconvertir
-  s = s.replace(/ /g, "+");
-
-  // 5) Supprimer CR/LF/TAB
-  s = s.replace(/[\r\n\t]/g, "");
-
-  // 6) base64url -> base64 standard
-  s = s.replace(/-/g, "+").replace(/_/g, "/");
-
-  // 7) Padding à multiple de 4
-  const mod4 = s.length % 4;
-  if (mod4 === 2) s += "==";
-  else if (mod4 === 3) s += "=";
-  else if (mod4 === 1) throw new Error("Longueur base64 invalide");
-
-  // 8) Vérif alphabet base64 (lenient: suppression limitée de bruit)
-  const illegal = s.match(/[^A-Za-z0-9+/=]/g);
-  if (illegal) {
-    if (!opts.lenient) {
-      const pos = s.search(/[^A-Za-z0-9+/=]/);
-      throw new Error(
-        `Contient un caractère non base64 à l'index ${pos} (code ${s.charCodeAt(
-          pos
-        )})`
-      );
-    }
-    const before = s.length;
-    s = s.replace(/[^A-Za-z0-9+/=]/g, "");
-    const dropped = before - s.length;
-    const ratio = dropped / before;
-    if (dropped > (opts.maxDropAbs || 64) && ratio > (opts.maxDropRatio || 0.01)) {
-      throw new Error(
-        `Trop de caractères non base64 supprimés (${dropped}, ${Math.round(
-          ratio * 100
-        )}%). Vérifiez l'encodage amont.`
-      );
-    }
-  }
-
-  // 9) Décodage base64
-  const buf = Buffer.from(s, "base64");
-  if (buf.length < 500) {
-    throw new Error(
-      `Image trop petite (${buf.length} octets). Minimum 500 octets requis.`
-    );
-  }
-
-  // 10) Détection type (magic numbers)
-  let detected = "unknown";
-  if (buf[0] === 0xff && buf[1] === 0xd8) detected = "image/jpeg";
-  else if (
-    buf[0] === 0x89 &&
-    buf[1] === 0x50 &&
-    buf[2] === 0x4e &&
-    buf[3] === 0x47
-  )
-    detected = "image/png";
-  else if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46)
-    detected = "image/gif";
-  else if (
-    buf.slice(0, 4).toString() === "RIFF" &&
-    buf.slice(8, 12).toString() === "WEBP"
-  )
-    detected = "image/webp";
-
-  if (opts.debug) {
-    console.log("[sanitizeBase64DataUrl]", {
-      len: s.length,
-      mod4,
-      mime,
-      detected,
-    });
-  }
-
-  return { buffer: buf, mime: mime || detected };
-}
-
 function generatePDF(content) {
   return new Promise((resolve, reject) => {
     try {
@@ -200,11 +60,7 @@ function generatePDF(content) {
         margin: 50,
         size: "A4",
         bufferPages: true,
-        info: {
-          Title: content.title,
-          Author: "Assistant GPT",
-          Subject: content.title,
-        },
+        info: { Title: content.title, Author: "Assistant GPT", Subject: content.title },
       });
 
       const chunks = [];
@@ -213,18 +69,9 @@ function generatePDF(content) {
       doc.on("error", reject);
 
       // En-tête
-      doc
-        .fontSize(26)
-        .font("Helvetica-Bold")
-        .fillColor("#1e40af")
-        .text(content.title, { align: "center" });
+      doc.fontSize(26).font("Helvetica-Bold").fillColor("#1e40af").text(content.title, { align: "center" });
       doc.moveDown(0.5);
-      doc
-        .strokeColor("#3b82f6")
-        .lineWidth(2)
-        .moveTo(50, doc.y)
-        .lineTo(doc.page.width - 50, doc.y)
-        .stroke();
+      doc.strokeColor("#3b82f6").lineWidth(2).moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
       doc.moveDown();
 
       // Date
@@ -233,27 +80,16 @@ function generatePDF(content) {
         .fillColor("#6b7280")
         .font("Helvetica")
         .text(
-          `Date: ${new Date().toLocaleDateString("fr-FR", {
-            year: "numeric",
-            month: "long",
-            day: "numeric",
-          })}`,
+          Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })},
           { align: "right" }
         );
       doc.moveDown(2);
 
       // Introduction
       if (content.introduction) {
-        doc
-          .fontSize(16)
-          .font("Helvetica-Bold")
-          .fillColor("#1f2937")
-          .text("Introduction");
+        doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Introduction");
         doc.moveDown(0.5);
-        doc
-          .fontSize(11)
-          .font("Helvetica")
-          .fillColor("#374151")
+        doc.fontSize(11).font("Helvetica").fillColor("#374151")
           .text(content.introduction, { align: "justify", lineGap: 3 });
         doc.moveDown(2);
       }
@@ -261,102 +97,131 @@ function generatePDF(content) {
       // Sections
       if (Array.isArray(content.sections)) {
         content.sections.forEach((section, index) => {
-          if (doc.y > doc.page.height - 150) doc.addPage();
-
-          doc
-            .fontSize(14)
-            .font("Helvetica-Bold")
-            .fillColor("#1e40af")
-            .text(`${index + 1}. ${section.title}`);
+          // Vérifier si besoin d'une nouvelle page
+          if (doc.y > doc.page.height - 150) {
+            doc.addPage();
+          }
+          
+          doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(${index + 1}. ${section.title});
           doc.moveDown(0.5);
-
+          
+          // Contenu texte
           if (section.content) {
-            doc
-              .fontSize(11)
-              .font("Helvetica")
-              .fillColor("#374151")
+            doc.fontSize(11).font("Helvetica").fillColor("#374151")
               .text(section.content, { align: "justify", lineGap: 3 });
             doc.moveDown(1);
           }
-
-          // Image
+          
+          // Image (si présente)
           if (section.image) {
             try {
-              const { buffer, mime } = sanitizeBase64DataUrl(section.image);
-
-              // PDFKit supporte JPEG & PNG
-              if (mime !== "image/jpeg" && mime !== "image/png") {
-                throw new Error(
-                  `Type d'image non supporté par PDFKit (${mime}). Utilisez JPEG ou PNG.`
-                );
+              // Extraire les données base64
+              let imageBuffer;
+              let base64Data = section.image;
+              
+              // Nettoyer les données base64
+              if (base64Data.startsWith('data:')) {
+                // Format: data:image/png;base64,iVBORw0KG...
+                base64Data = base64Data.split(',')[1];
               }
-
-              const maxWidth = doc.page.width - 100;
-              const maxHeight = 300;
-              if (doc.y > doc.page.height - maxHeight - 100) doc.addPage();
-
+              
+              // Supprimer les espaces blancs et caractères invisibles
+              base64Data = base64Data.replace(/\s/g, '');
+              
+              // Vérifier que c'est du base64 valide
+              if (!/^[A-Za-z0-9+/=]+$/.test(base64Data)) {
+                throw new Error("Format base64 invalide");
+              }
+              
+              // Créer le buffer
+              imageBuffer = Buffer.from(base64Data, 'base64');
+              
+              // Vérifier la taille minimale (un vrai fichier image doit faire au moins 500 octets)
+              if (imageBuffer.length < 500) {
+                throw new Error(Image trop petite (${imageBuffer.length} octets). Minimum 500 octets requis.);
+              }
+              
+              // Calculer les dimensions
+              const maxWidth = doc.page.width - 100; // Marges
+              const maxHeight = 300; // Hauteur max de l'image
+              
+              // Vérifier si on a assez d'espace, sinon nouvelle page
+              if (doc.y > doc.page.height - maxHeight - 100) {
+                doc.addPage();
+              }
+              
+              // Sauvegarder la position Y avant l'image
               const startY = doc.y;
-              doc.image(buffer, { fit: [maxWidth, maxHeight], align: "center" });
+              
+              // Ajouter l'image
+              doc.image(imageBuffer, {
+                fit: [maxWidth, maxHeight],
+                align: 'center'
+              });
+              
+              // Calculer combien d'espace l'image a pris
               const imageHeight = doc.y - startY;
-
-              if (imageHeight < 50) doc.moveDown(3);
-              else doc.moveDown(1);
-
+              
+              // S'assurer qu'on avance après l'image
+              if (imageHeight < 50) {
+                doc.moveDown(3);
+              } else {
+                doc.moveDown(1);
+              }
+              
+              // Légende (si présente)
               if (section.imageCaption) {
-                doc
-                  .fontSize(9)
-                  .fillColor("#6b7280")
-                  .font("Helvetica-Oblique")
+                doc.fontSize(9).fillColor("#6b7280").font("Helvetica-Oblique")
                   .text(section.imageCaption, { align: "center" });
                 doc.moveDown(1);
               }
+              
             } catch (imgError) {
               console.error("Erreur chargement image:", imgError.message);
-              doc
-                .fontSize(10)
-                .fillColor("#ef4444")
-                .text("⚠️ Erreur lors du chargement de l'image", {
-                  align: "center",
-                });
-              doc
-                .fontSize(8)
-                .fillColor("#9ca3af")
-                .text(`(${imgError.message})`, { align: "center" });
+              doc.fontSize(10).fillColor("#ef4444")
+                .text("⚠️ Erreur lors du chargement de l'image", { align: "center" });
+              doc.fontSize(8).fillColor("#9ca3af")
+                .text((${imgError.message}), { align: "center" });
               doc.moveDown(1);
             }
           }
-
+          
           doc.moveDown(1.5);
         });
       }
 
       // Conclusion
       if (content.conclusion) {
-        if (doc.y > doc.page.height - 150) doc.addPage();
-        doc
-          .fontSize(16)
-          .font("Helvetica-Bold")
-          .fillColor("#1f2937")
-          .text("Conclusion");
+        if (doc.y > doc.page.height - 150) {
+          doc.addPage();
+        }
+        
+        doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Conclusion");
         doc.moveDown(0.5);
-        doc
-          .fontSize(11)
-          .font("Helvetica")
-          .fillColor("#374151")
+        doc.fontSize(11).font("Helvetica").fillColor("#374151")
           .text(content.conclusion, { align: "justify", lineGap: 3 });
       }
 
-      // Pagination
+      // Numéros de page
       const range = doc.bufferedPageRange();
+      
       for (let i = 0; i < range.count; i++) {
         doc.switchToPage(i);
+        
         const oldY = doc.y;
+        
         doc.fontSize(8).fillColor("#9ca3af");
-        doc.text(`Page ${i + 1} sur ${range.count}`, 50, doc.page.height - 50, {
-          align: "center",
-          lineBreak: false,
-          width: doc.page.width - 100,
-        });
+        doc.text(
+          Page ${i + 1} sur ${range.count},
+          50,
+          doc.page.height - 50,
+          { 
+            align: "center",
+            lineBreak: false,
+            width: doc.page.width - 100
+          }
+        );
+        
         if (i < range.count - 1) {
           doc.switchToPage(i);
           doc.y = oldY;
@@ -371,13 +236,7 @@ function generatePDF(content) {
   });
 }
 
-async function sendEmailWithPdf({
-  to,
-  subject,
-  messageHtml,
-  pdfBuffer,
-  pdfFilename,
-}) {
+async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilename }) {
   return transporter.sendMail({
     from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM },
     to,
@@ -417,11 +276,9 @@ app.post("/api/generate-and-send", async (req, res) => {
     }
 
     const pdfBuffer = await generatePDF(reportContent);
-    const pdfName = `rapport_${reportContent.title
-      .replace(/[^a-z0-9]/gi, "_")
-      .toLowerCase()}_${Date.now()}.pdf`;
+    const pdfName = rapport_${reportContent.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf;
 
-    const html = `
+    const html = 
       <!DOCTYPE html>
       <html>
         <body style="font-family: Arial, sans-serif; line-height:1.6; color:#111827;">
@@ -435,11 +292,11 @@ app.post("/api/generate-and-send", async (req, res) => {
           <p style="color:#6b7280;font-size:12px">© ${new Date().getFullYear()} ${EMAIL_FROM_NAME}</p>
         </body>
       </html>
-    `;
+    ;
 
     await sendEmailWithPdf({
       to: email,
-      subject: `Rapport : ${reportContent.title}`,
+      subject: Rapport : ${reportContent.title},
       messageHtml: html,
       pdfBuffer,
       pdfFilename: pdfName,
@@ -450,7 +307,7 @@ app.post("/api/generate-and-send", async (req, res) => {
       message: "Rapport généré et envoyé avec succès",
       details: {
         email,
-        pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
+        pdfSize: ${(pdfBuffer.length / 1024).toFixed(2)} KB,
       },
     });
   } catch (err) {
@@ -463,57 +320,55 @@ app.post("/api/generate-and-send", async (req, res) => {
   }
 });
 
-/**
- * Validation d'une image base64 (diagnostic rapide)
- */
-app.post("/api/test-image", (req, res) => {
+app.post("/api/test-image", async (req, res) => {
   try {
-    const { imageData } = req.body || {};
+    const { imageData } = req.body;
+    
     if (!imageData) {
       return res.status(400).json({ error: "imageData requis" });
     }
-
-    const { buffer, mime } = sanitizeBase64DataUrl(imageData);
-    const pdfkitOk = mime === "image/jpeg" || mime === "image/png";
-
-    return res.json({
-      success: true,
-      mime,
-      size: `${(buffer.length / 1024).toFixed(2)} KB`,
-      pdfkitCompatible: pdfkitOk,
-      note: pdfkitOk ? "OK pour PDFKit" : "Utilisez JPEG ou PNG pour PDFKit",
-    });
-  } catch (err) {
-    return res.status(400).json({ error: err.message });
-  }
-});
-
-/**
- * Endpoint de debug pour voir où ça casse si besoin
- */
-app.post("/api/debug/base64", (req, res) => {
-  try {
-    const { data } = req.body || {};
-    if (!data) return res.status(400).json({ error: "champ 'data' requis" });
-
-    try {
-      const { buffer, mime } = sanitizeBase64DataUrl(data, { debug: true });
-      return res.json({
-        ok: true,
-        mime,
-        size: buffer.length,
-        head: buffer.slice(0, 8).toString("hex"),
-      });
-    } catch (e) {
-      const s = String(data);
-      return res.status(400).json({
-        ok: false,
-        error: e.message,
-        sampleStart: s.slice(0, 80),
-        sampleEnd: s.slice(-40),
-        length: s.length,
+    
+    let base64Data = imageData;
+    
+    // Nettoyer
+    if (base64Data.startsWith('data:')) {
+      base64Data = base64Data.split(',')[1];
+    }
+    base64Data = base64Data.replace(/\s/g, '');
+    
+    // Vérifier format
+    if (!/^[A-Za-z0-9+/=]+$/.test(base64Data)) {
+      return res.status(400).json({ 
+        error: "Format base64 invalide",
+        details: "Contient des caractères non base64"
       });
     }
+    
+    // Créer buffer
+    const buffer = Buffer.from(base64Data, 'base64');
+    
+    // Vérifier taille
+    if (buffer.length < 500) {
+      return res.status(400).json({ 
+        error: "Image trop petite",
+        size: buffer.length,
+        message: "L'image doit faire au moins 500 octets. Utilisez une vraie image (minimum 100x100 pixels)."
+      });
+    }
+    
+    // Détecter le type
+    let type = "inconnu";
+    if (buffer[0] === 0xFF && buffer[1] === 0xD8) type = "JPEG";
+    else if (buffer[0] === 0x89 && buffer[1] === 0x50) type = "PNG";
+    else if (buffer[0] === 0x47 && buffer[1] === 0x49) type = "GIF";
+    
+    return res.json({
+      success: true,
+      imageType: type,
+      size: ${(buffer.length / 1024).toFixed(2)} KB,
+      dimensions: "OK - Peut être traité par PDFKit"
+    });
+    
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -524,7 +379,7 @@ app.get("/health", (_req, res) => {
     status: "OK",
     timestamp: new Date().toISOString(),
     uptime: Math.floor(process.uptime()),
-    service: "PDF Report API",
+    service: "PDF Report API"
   });
 });
 
@@ -536,18 +391,12 @@ app.get("/", (_req, res) => {
     endpoints: {
       health: "GET /health",
       generateAndSend: "POST /api/generate-and-send",
-      testImage: "POST /api/test-image",
-      debugBase64: "POST /api/debug/base64",
     },
   });
 });
 
-// 404
-app.use((req, res) =>
-  res.status(404).json({ error: "Route non trouvée", path: req.path })
-);
+app.use((req, res) => res.status(404).json({ error: "Route non trouvée", path: req.path }));
 
-// 500
 app.use((err, _req, res, _next) => {
   console.error("Erreur:", err);
   res.status(500).json({ error: "Erreur serveur", message: err.message });
@@ -556,11 +405,8 @@ app.use((err, _req, res, _next) => {
 /* ============================ START ============================ */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 API démarrée sur port ${PORT}`);
+  console.log(🚀 API démarrée sur port ${PORT});
 });
 
 process.on("unhandledRejection", (r) => console.error("Unhandled Rejection:", r));
-process.on("uncaughtException", (e) => {
-  console.error("Uncaught Exception:", e);
-  process.exit(1);
-});
+process.on("uncaughtException", (e) => { console.error("Uncaught Exception:", e); process.exit(1); });
