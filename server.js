@@ -290,7 +290,29 @@ app.post("/api/generate-and-send", async (req, res) => {
       return res.status(400).json({ success: false, error: "Structure du rapport invalide" });
     }
 
-    const pdfBuffer = await generatePDF(reportContent);
+    // Validation préliminaire des images de sections (avant PDF)
+if (Array.isArray(reportContent.sections)) {
+  for (let i = 0; i < reportContent.sections.length; i++) {
+    const s = reportContent.sections[i];
+    if (s && s.image) {
+      try {
+        const cleaned = cleanAndValidateBase64(s.image);
+        const buf = Buffer.from(cleaned, "base64");
+        validateImageBuffer(buf);
+        // Remplace par la version nettoyée pour éviter toute surprise plus tard
+        reportContent.sections[i].image = cleaned;
+      } catch (e) {
+        return res.status(400).json({
+          success: false,
+          error: `Image invalide dans sections[${i}]`,
+          details: e.message,
+        });
+      }
+    }
+  }
+}
+
+const pdfBuffer = await generatePDF(reportContent);
     const pdfName = `rapport_${reportContent.title.replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf`;
 
     const html = `
