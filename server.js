@@ -120,25 +120,37 @@ function generatePDF(content) {
               let base64Data = section.image;
               
               // Nettoyer les données base64
-              if (base64Data.startsWith('data:')) {
+              if (base64Data.includes('data:image')) {
                 // Format: data:image/png;base64,iVBORw0KG...
-                base64Data = base64Data.split(',')[1];
+                const parts = base64Data.split(',');
+                base64Data = parts.length > 1 ? parts[1] : parts[0];
               }
               
-              // Supprimer les espaces blancs et caractères invisibles
-              base64Data = base64Data.replace(/\s/g, '');
+              // Supprimer TOUS les espaces, retours à la ligne, etc.
+              base64Data = base64Data.replace(/[\s\n\r\t]/g, '');
               
-              // Vérifier que c'est du base64 valide
-              if (!/^[A-Za-z0-9+/=]+$/.test(base64Data)) {
-                throw new Error("Format base64 invalide");
+              // Supprimer les caractères non-base64 courants (mais garder +/=)
+              base64Data = base64Data.replace(/[^A-Za-z0-9+/=]/g, '');
+              
+              // Essayer de créer le buffer (Node.js est tolérant)
+              try {
+                imageBuffer = Buffer.from(base64Data, 'base64');
+              } catch (bufferError) {
+                throw new Error("Impossible de décoder le base64");
               }
               
-              // Créer le buffer
-              imageBuffer = Buffer.from(base64Data, 'base64');
-              
-              // Vérifier la taille minimale (un vrai fichier image doit faire au moins 500 octets)
+              // Vérifier la taille minimale
               if (imageBuffer.length < 500) {
                 throw new Error(`Image trop petite (${imageBuffer.length} octets). Minimum 500 octets requis.`);
+              }
+              
+              // Vérifier que c'est vraiment une image (magic bytes)
+              const isPNG = imageBuffer[0] === 0x89 && imageBuffer[1] === 0x50;
+              const isJPEG = imageBuffer[0] === 0xFF && imageBuffer[1] === 0xD8;
+              const isGIF = imageBuffer[0] === 0x47 && imageBuffer[1] === 0x49;
+              
+              if (!isPNG && !isJPEG && !isGIF) {
+                throw new Error("Format d'image non supporté (attendu: PNG, JPEG ou GIF)");
               }
               
               // Calculer les dimensions
@@ -331,21 +343,27 @@ app.post("/api/test-image", async (req, res) => {
     let base64Data = imageData;
     
     // Nettoyer
-    if (base64Data.startsWith('data:')) {
-      base64Data = base64Data.split(',')[1];
+    if (base64Data.includes('data:image')) {
+      const parts = base64Data.split(',');
+      base64Data = parts.length > 1 ? parts[1] : parts[0];
     }
-    base64Data = base64Data.replace(/\s/g, '');
     
-    // Vérifier format
-    if (!/^[A-Za-z0-9+/=]+$/.test(base64Data)) {
-      return res.status(400).json({ 
-        error: "Format base64 invalide",
-        details: "Contient des caractères non base64"
-      });
-    }
+    // Supprimer tous les espaces et caractères invisibles
+    base64Data = base64Data.replace(/[\s\n\r\t]/g, '');
+    
+    // Supprimer les caractères non-base64
+    base64Data = base64Data.replace(/[^A-Za-z0-9+/=]/g, '');
     
     // Créer buffer
-    const buffer = Buffer.from(base64Data, 'base64');
+    let buffer;
+    try {
+      buffer = Buffer.from(base64Data, 'base64');
+    } catch (err) {
+      return res.status(400).json({ 
+        error: "Impossible de décoder le base64",
+        details: err.message
+      });
+    }
     
     // Vérifier taille
     if (buffer.length < 500) {
@@ -356,17 +374,36 @@ app.post("/api/test-image", async (req, res) => {
       });
     }
     
-    // Détecter le type
+    // Détecter le type via magic bytes
     let type = "inconnu";
-    if (buffer[0] === 0xFF && buffer[1] === 0xD8) type = "JPEG";
-    else if (buffer[0] === 0x89 && buffer[1] === 0x50) type = "PNG";
-    else if (buffer[0] === 0x47 && buffer[1] === 0x49) type = "GIF";
+    let valid = false;
+    
+    if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
+      type = "JPEG";
+      valid = true;
+    } else if (buffer[0] === 0x89 && buffer[1] === 0x50) {
+      type = "PNG";
+      valid = true;
+    } else if (buffer[0] === 0x47 && buffer[1] === 0x49) {
+      type = "GIF";
+      valid = true;
+    }
+    
+    if (!valid) {
+      return res.status(400).json({
+        error: "Format d'image non supporté",
+        details: `Magic bytes: ${buffer[0].toString(16)} ${buffer[1].toString(16)}`,
+        message: "Seuls PNG, JPEG et GIF sont supportés"
+      });
+    }
     
     return res.json({
       success: true,
       imageType: type,
       size: `${(buffer.length / 1024).toFixed(2)} KB`,
-      dimensions: "OK - Peut être traité par PDFKit"
+      sizeBytes: buffer.length,
+      dimensions: "OK - Image valide pour PDFKit",
+      magicBytes: `${buffer[0].toString(16).padStart(2, '0')} ${buffer[1].toString(16).padStart(2, '0')}`
     });
     
   } catch (err) {
