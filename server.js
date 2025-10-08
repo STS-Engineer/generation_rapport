@@ -14,10 +14,9 @@ const EMAIL_FROM_NAME = "Administration STS";
 const EMAIL_FROM = "administration.STS@avocarbon.com";
 
 /* ========================= MIDDLEWARES ========================= */
-app.use(express.json({ limit: "50mb" })); // Augmenté pour les images
+app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// CORS plus permissif pour ChatGPT
 app.use(
   cors({
     origin: true,
@@ -27,7 +26,6 @@ app.use(
   })
 );
 
-// Préflight pour toutes les routes
 app.options("*", cors());
 
 app.use((req, _res, next) => {
@@ -53,38 +51,39 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-// Fonction utilitaire pour nettoyer et valider le base64
 function cleanAndValidateBase64(imageData) {
   let base64Data = imageData;
   
-  // Nettoyer
   if (typeof base64Data === 'string' && base64Data.includes('data:image')) {
     const parts = base64Data.split(',');
     base64Data = parts.length > 1 ? parts[1] : parts[0];
   }
   
-  // Supprimer tous les espaces et caractères invisibles
   base64Data = base64Data.replace(/[\s\n\r\t]/g, '');
-  
-  // Supprimer les caractères non-base64
   base64Data = base64Data.replace(/[^A-Za-z0-9+/=]/g, '');
   
   return base64Data;
 }
 
 function validateImageBuffer(buffer) {
-  // Vérifier la taille minimale
   if (buffer.length < 10) {
-    throw new Error(`Image trop petite (${buffer.length} octets). Minimum 10 octets requis.`);
+    throw new Error(`Image trop petite (${buffer.length} octets)`);
   }
   
-  // Vérifier que c'est vraiment une image (magic bytes)
-  const isPNG = buffer[0] === 0x89 && buffer[1] === 0x50;
-  const isJPEG = buffer[0] === 0xFF && buffer[1] === 0xD8;
-  const isGIF = buffer[0] === 0x47 && buffer[1] === 0x49;
+  // PNG: 89 50 4E 47 (plus complet)
+  const isPNG = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47;
+  // JPEG: FF D8 FF
+  const isJPEG = buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF;
+  // GIF: 47 49 46
+  const isGIF = buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46;
   
+  // Log pour debug
+  console.log(`Image validation - PNG:${isPNG}, JPEG:${isJPEG}, GIF:${isGIF}`);
+  console.log(`Magic bytes: ${buffer[0].toString(16)} ${buffer[1].toString(16)} ${buffer[2].toString(16)} ${buffer[3].toString(16)}`);
+  
+  // NE PAS REJETER - laisser PDFKit essayer même si format non reconnu
   if (!isPNG && !isJPEG && !isGIF) {
-    throw new Error("Format d'image non supporté (attendu: PNG, JPEG ou GIF)");
+    console.warn("⚠️ Format non reconnu, mais tentative avec PDFKit...");
   }
   
   return true;
@@ -134,7 +133,6 @@ function generatePDF(content) {
       // Sections
       if (Array.isArray(content.sections)) {
         content.sections.forEach((section, index) => {
-          // Vérifier si besoin d'une nouvelle page
           if (doc.y > doc.page.height - 150) {
             doc.addPage();
           }
@@ -142,59 +140,42 @@ function generatePDF(content) {
           doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(`${index + 1}. ${section.title}`);
           doc.moveDown(0.5);
           
-          // Contenu texte
           if (section.content) {
             doc.fontSize(11).font("Helvetica").fillColor("#374151")
               .text(section.content, { align: "justify", lineGap: 3 });
             doc.moveDown(1);
           }
           
-          // Image (si présente)
+          // Image
           if (section.image) {
             try {
-              // Nettoyer le base64 avec la fonction utilitaire
+              console.log("=== Traitement image ===");
               const cleanedBase64 = cleanAndValidateBase64(section.image);
+              console.log(`Base64 length: ${cleanedBase64.length}`);
               
-              // Créer le buffer
-              let imageBuffer;
-              try {
-                imageBuffer = Buffer.from(cleanedBase64, 'base64');
-              } catch (bufferError) {
-                throw new Error("Impossible de décoder le base64");
-              }
+              const imageBuffer = Buffer.from(cleanedBase64, 'base64');
+              console.log(`Buffer size: ${imageBuffer.length} bytes`);
               
-              // Valider l'image avec la fonction utilitaire
+              // Valider (ne rejette plus)
               validateImageBuffer(imageBuffer);
               
-              // Calculer les dimensions
-              const maxWidth = doc.page.width - 100; // Marges
-              const maxHeight = 300; // Hauteur max de l'image
+              const maxWidth = doc.page.width - 100;
+              const maxHeight = 300;
               
-              // Vérifier si on a assez d'espace, sinon nouvelle page
               if (doc.y > doc.page.height - maxHeight - 100) {
                 doc.addPage();
               }
               
-              // Sauvegarder la position Y avant l'image
-              const startY = doc.y;
-              
-              // Ajouter l'image
+              // Ajouter l'image - PDFKit gère automatiquement le format
+              console.log("Ajout image au PDF...");
               doc.image(imageBuffer, {
                 fit: [maxWidth, maxHeight],
                 align: 'center'
               });
+              console.log("✅ Image ajoutée");
               
-              // Calculer combien d'espace l'image a pris
-              const imageHeight = doc.y - startY;
+              doc.moveDown(1);
               
-              // S'assurer qu'on avance après l'image
-              if (imageHeight < 50) {
-                doc.moveDown(3);
-              } else {
-                doc.moveDown(1);
-              }
-              
-              // Légende (si présente)
               if (section.imageCaption) {
                 doc.fontSize(9).fillColor("#6b7280").font("Helvetica-Oblique")
                   .text(section.imageCaption, { align: "center" });
@@ -202,7 +183,7 @@ function generatePDF(content) {
               }
               
             } catch (imgError) {
-              console.error("Erreur chargement image:", imgError.message);
+              console.error("❌ Erreur image:", imgError.message);
               doc.fontSize(10).fillColor("#ef4444")
                 .text("⚠️ Erreur lors du chargement de l'image", { align: "center" });
               doc.fontSize(8).fillColor("#9ca3af")
@@ -353,10 +334,8 @@ app.post("/api/test-image", async (req, res) => {
       return res.status(400).json({ error: "imageData requis" });
     }
     
-    // Utiliser la fonction utilitaire de nettoyage
     const cleanedBase64 = cleanAndValidateBase64(imageData);
     
-    // Créer buffer
     let buffer;
     try {
       buffer = Buffer.from(cleanedBase64, 'base64');
@@ -367,7 +346,7 @@ app.post("/api/test-image", async (req, res) => {
       });
     }
     
-    // Valider avec la fonction utilitaire
+    // Valider
     try {
       validateImageBuffer(buffer);
     } catch (validationError) {
@@ -376,13 +355,13 @@ app.post("/api/test-image", async (req, res) => {
       });
     }
     
-    // Détecter le type via magic bytes
+    // Détecter le type
     let type = "inconnu";
-    if (buffer[0] === 0xFF && buffer[1] === 0xD8) {
+    if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
       type = "JPEG";
-    } else if (buffer[0] === 0x89 && buffer[1] === 0x50) {
+    } else if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
       type = "PNG";
-    } else if (buffer[0] === 0x47 && buffer[1] === 0x49) {
+    } else if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
       type = "GIF";
     }
     
@@ -392,7 +371,7 @@ app.post("/api/test-image", async (req, res) => {
       size: `${(buffer.length / 1024).toFixed(2)} KB`,
       sizeBytes: buffer.length,
       dimensions: "OK - Image valide pour PDFKit",
-      magicBytes: `${buffer[0].toString(16).padStart(2, '0')} ${buffer[1].toString(16).padStart(2, '0')}`
+      magicBytes: `${buffer[0].toString(16).padStart(2, '0')} ${buffer[1].toString(16).padStart(2, '0')} ${buffer[2].toString(16).padStart(2, '0')} ${buffer[3].toString(16).padStart(2, '0')}`
     });
     
   } catch (err) {
@@ -416,6 +395,7 @@ app.get("/", (_req, res) => {
     status: "running",
     endpoints: {
       health: "GET /health",
+      testImage: "POST /api/test-image",
       generateAndSend: "POST /api/generate-and-send",
     },
   });
