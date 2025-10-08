@@ -74,8 +74,8 @@ function cleanAndValidateBase64(imageData) {
 
 function validateImageBuffer(buffer) {
   // Vérifier la taille minimale
-  if (buffer.length < 500) {
-    throw new Error(`Image trop petite (${buffer.length} octets). Minimum 500 octets requis.`);
+  if (buffer.length < 10) {
+    throw new Error(`Image trop petite (${buffer.length} octets). Minimum 10 octets requis.`);
   }
   
   // Vérifier que c'est vraiment une image (magic bytes)
