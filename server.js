@@ -152,71 +152,13 @@ function generatePDF(content) {
           // Image (si présente)
           if (section.image) {
             try {
-              console.log("=== Traitement de l'image ===");
-              
               // Nettoyer le base64 avec la fonction utilitaire
               const cleanedBase64 = cleanAndValidateBase64(section.image);
-              console.log(`Base64 nettoyé: ${cleanedBase64.length} caractères`);
               
               // Créer le buffer
               let imageBuffer;
               try {
                 imageBuffer = Buffer.from(cleanedBase64, 'base64');
-                console.log(`Buffer créé: ${imageBuffer.length} octets`);
-              } catch (bufferError) {
-                throw new Error("Impossible de décoder le base64");
-              }
-              
-              // Valider l'image avec la fonction utilitaire (ne throw plus d'erreur)
-              validateImageBuffer(imageBuffer);
-              
-              // Calculer les dimensions
-              const maxWidth = doc.page.width - 100; // Marges
-              const maxHeight = 300; // Hauteur max de l'image
-              
-              // Vérifier si on a assez d'espace, sinon nouvelle page
-              if (doc.y > doc.page.height - maxHeight - 100) {
-                doc.addPage();
-              }
-              
-              // Sauvegarder la position Y avant l'image
-              const startY = doc.y;
-              
-              // Ajouter l'image - PDFKit va détecter le format automatiquement
-              console.log("Ajout de l'image au PDF...");
-              doc.image(imageBuffer, {
-                fit: [maxWidth, maxHeight],
-                align: 'center'
-              });
-              console.log("✅ Image ajoutée avec succès");
-              
-              // Calculer combien d'espace l'image a pris
-              const imageHeight = doc.y - startY;
-              
-              // S'assurer qu'on avance après l'image
-              if (imageHeight < 50) {
-                doc.moveDown(3);
-              } else {
-                doc.moveDown(1);
-              }
-              
-              // Légende (si présente)
-              if (section.imageCaption) {
-                doc.fontSize(9).fillColor("#6b7280").font("Helvetica-Oblique")
-                  .text(section.imageCaption, { align: "center" });
-                doc.moveDown(1);
-              }
-              
-            } catch (imgError) {
-              console.error("❌ Erreur chargement image:", imgError);
-              console.error("Stack:", imgError.stack);
-              doc.fontSize(10).fillColor("#ef4444")
-                .text("⚠️ Erreur lors du chargement de l'image", { align: "center" });
-              doc.fontSize(8).fillColor("#9ca3af")
-                .text(`(${imgError.message})`, { align: "center" });
-              doc.moveDown(1);
-            }
-          }dBase64, 'base64');
               } catch (bufferError) {
                 throw new Error("Impossible de décoder le base64");
               }
