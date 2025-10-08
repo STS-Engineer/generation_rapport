@@ -105,7 +105,7 @@ function cleanAndValidateBase64(imageData) {
 
   // 6) Garde-fou simple avant décodage
   if (base64Data.length < 100) {
-    throw new Error("Chaîne base64 trop courte avant décodage");
+    console.warn('[warn] Chaîne base64 courte avant décodage'); // toléré, on validera après décodage
   }
 
   return base64Data;
