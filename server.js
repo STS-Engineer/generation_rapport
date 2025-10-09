@@ -112,24 +112,42 @@ function fetchUrlToBuffer(url) {
   });
 }
 
-// Chargement image depuis URL, chemin local, ou base64 (fallback)
+/**
+ * Option B: compat /mnt/data -> ./assets
+ * Chargement image depuis URL, chemin local, ou base64 (fallback)
+ */
 async function loadImageToBuffer({ imageUrl, imagePath, imageBase64 }) {
   if (imageUrl) {
     return await fetchUrlToBuffer(imageUrl);
   }
+
   if (imagePath) {
-    const full = path.resolve(imagePath);
-    if (!fs.existsSync(full)) {
+    let normalizedPath = String(imagePath);
+
+    // Compat: si le client envoie /mnt/data/xxx, on mappe vers ./assets/xxx
+    if (normalizedPath.startsWith("/mnt/data/")) {
+      const fileOnly = normalizedPath.replace("/mnt/data/", "");
+      normalizedPath = path.join(process.cwd(), "assets", fileOnly);
+      console.warn(`Compat mapping: '/mnt/data/…' → ${normalizedPath}`);
+    } else if (!path.isAbsolute(normalizedPath)) {
+      // Chemin relatif → résoudre depuis cwd
+      normalizedPath = path.resolve(normalizedPath);
+    } // sinon chemin absolu: on le garde tel quel
+
+    if (!fs.existsSync(normalizedPath)) {
       throw new Error(
-        `Fichier image introuvable: ${full} (cwd=${process.cwd()}). Vérifie le déploiement et/ou utilise imageUrl.`
+        `Fichier image introuvable: ${normalizedPath} (reçu: ${imagePath}). ` +
+          `Conseil: utilisez imageUrl "https://.../static/<fichier>" ou placez le fichier dans ./assets.`
       );
     }
-    return fs.promises.readFile(full);
+    return fs.promises.readFile(normalizedPath);
   }
+
   if (imageBase64) {
     const cleaned = cleanAndValidateBase64(imageBase64);
     return Buffer.from(cleaned, "base64");
   }
+
   throw new Error("Aucune source d'image fournie (imageUrl | imagePath | image base64).");
 }
 
@@ -161,10 +179,10 @@ function validateImageBuffer(buffer) {
 }
 
 /**
- * Normalise une image problématique pour PDFKit :
+ * Normalise une image pour PDFKit :
  * - respect orientation EXIF
  * - convertit en PNG (ou JPEG) propre
- * - évite les marqueurs APP/JFIF exotiques
+ * - évite marqueurs APP/JFIF exotiques (Invalid APP Tag)
  */
 async function normalizeImageBuffer(buffer, { format = "png" } = {}) {
   const img = sharp(buffer, { failOn: "none" }).rotate();
@@ -237,7 +255,7 @@ function generatePDF(content) {
               doc.moveDown(1);
             }
 
-            // Image via URL (prioritaire), sinon imagePath, sinon base64 "image"
+            // Image via imagePath (compat /mnt/data), imageUrl, ou base64 "image"
             if (section.imageUrl || section.imagePath || section.image) {
               try {
                 console.log("=== Insertion image ===");
@@ -285,8 +303,8 @@ function generatePDF(content) {
                 }
               } catch (imgError) {
                 const msg = (imgError && (imgError.message || imgError.reason)) ?? String(imgError);
-                console.error("❌ Erreur image:", msg);
-                doc.fontSize(10).fillColor("#ef4444").text("⚠️ Erreur lors du chargement de l'image", { align: "center" });
+                console.error(`❌ Erreur image (section #${index + 1}):`, msg, "| imageUrl=", section.imageUrl, "| imagePath=", section.imagePath);
+                doc.fontSize(10).fillColor("#ef4444").text(`⚠️ Erreur lors du chargement de l'image (section ${index + 1})`, { align: "center" });
                 doc.fontSize(8).fillColor("#9ca3af").text(`(${msg})`, { align: "center" });
                 doc.moveDown(1);
               }
