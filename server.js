@@ -166,12 +166,26 @@ function generatePDF(content) {
                 doc.addPage();
               }
               
-              // Ajouter l'image - PDFKit gère automatiquement le format
+              // SOLUTION pour "Invalid APP Tag" : utiliser l'option width/height au lieu de fit
               console.log("Ajout image au PDF...");
-              doc.image(imageBuffer, {
-                fit: [maxWidth, maxHeight],
-                align: 'center'
-              });
+              try {
+                // Essayer avec fit d'abord
+                doc.image(imageBuffer, {
+                  fit: [maxWidth, maxHeight],
+                  align: 'center'
+                });
+              } catch (pdfkitError) {
+                // Si erreur APP Tag, essayer avec width seulement
+                if (pdfkitError.message.includes('APP Tag')) {
+                  console.log("⚠️ Erreur APP Tag, réessai avec width...");
+                  doc.image(imageBuffer, {
+                    width: maxWidth,
+                    align: 'center'
+                  });
+                } else {
+                  throw pdfkitError;
+                }
+              }
               console.log("✅ Image ajoutée");
               
               doc.moveDown(1);
