@@ -1,346 +1,520 @@
-# server.py — Support Orchestrator API (FastAPI, Python)
-# - Enregistre les commentaires en PostgreSQL (username, assistant_name, comment, created_at)
-# - Génère un PDF (ReportLab) SANS images
-# - Envoie l'email via SMTP (EOP port 25)
-# - Destinataire email FORCÉ (DEFAULT_RECIPIENT)
-# - Sujet email GÉNÉRÉ côté serveur: "Ticket Support — {assistant_name}"
+"use strict";
 
-import os
-import io
-import logging
-import datetime
-import smtplib
-from email.message import EmailMessage
-from typing import List, Optional
+const express = require("express");
+const PDFDocument = require("pdfkit");
+const nodemailer = require("nodemailer");
+const cors = require("cors");
+const http = require("http");
+const https = require("https");
+const fs = require("fs");
+const path = require("path");
+const sharp = require("sharp"); // normalisation d'images
 
-from fastapi import FastAPI, HTTPException, Body
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+const app = express();
 
-# ========================= LOGGING =========================
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("support-server")
+/* ========================= CONFIG FIXE ========================= */
+const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
+const SMTP_PORT = 25;
+const EMAIL_FROM_NAME = "Administration STS";
+const EMAIL_FROM = "administration.STS@avocarbon.com";
 
-# ========================= CONFIG DB =========================
-PG_HOST = os.getenv("PG_HOST", "avo-adb-001.postgres.database.azure.com")
-PG_PORT = int(os.getenv("PG_PORT", "5432"))
-PG_DB   = os.getenv("PG_DB", "gpt_support")
-PG_USER = os.getenv("PG_USER", "adminavo")
-PG_PASS = os.getenv("PG_PASS", "$#fKcdXPg4@ue8AW")
-PG_SSLMODE = os.getenv("PG_SSLMODE", "require")  # Azure -> SSL
+/* ========================= MIDDLEWARES ========================= */
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-# ========================= CONFIG SMTP =========================
-SMTP_HOST = os.getenv("SMTP_HOST", "avocarbon-com.mail.protection.outlook.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "25"))
-EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Support IA")
-EMAIL_FROM = os.getenv("EMAIL_FROM", "no-reply@avocarbon.com")  # expéditeur nominal
-DEFAULT_RECIPIENT = os.getenv("DEFAULT_RECIPIENT", "majed.messai@avocarbon.com")
+// Servir des fichiers statiques (ex: ./assets/img.png -> /static/img.png)
+app.use("/static", express.static(path.join(process.cwd(), "assets")));
 
-# ========================= POSTGRES =========================
-import psycopg2
-from psycopg2.extras import RealDictCursor
+// CORS permissif (ChatGPT / navigateurs)
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "openai-conversation-id",
+      "openai-ephemeral-user-id",
+    ],
+  })
+);
+app.options("*", cors());
 
-def get_connection():
-    return psycopg2.connect(
-        host=PG_HOST, port=PG_PORT, dbname=PG_DB,
-        user=PG_USER, password=PG_PASS, sslmode=PG_SSLMODE
-    )
+app.use((req, _res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
 
-def init_db():
-    sql = """
-    CREATE TABLE IF NOT EXISTS public.support_comments (
-        id SERIAL PRIMARY KEY,
-        username VARCHAR(255) NOT NULL,
-        assistant_name VARCHAR(255) NOT NULL,
-        comment TEXT NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-    """
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-        conn.commit()
-    logger.info("Table support_comments OK")
+/* ====================== TRANSPORTEUR SMTP ====================== */
+const transporter = nodemailer.createTransport({
+  host: SMTP_HOST,
+  port: SMTP_PORT,
+  secure: false,
+  tls: { minVersion: "TLSv1.2" },
+});
+transporter
+  .verify()
+  .then(() => console.log("✅ SMTP EOP prêt"))
+  .catch((err) =>
+    console.error("❌ SMTP erreur:", err && err.message ? err.message : String(err))
+  );
 
-def save_support_comment(username: str, assistant_name: str, comment: str) -> int:
-    sql = """
-    INSERT INTO public.support_comments (username, assistant_name, comment)
-    VALUES (%s, %s, %s) RETURNING id;
-    """
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (username, assistant_name, comment))
-            new_id = cur.fetchone()[0]
-        conn.commit()
-    return new_id
+/* ============================ UTILS ============================ */
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
+}
 
-def get_all_comments() -> List[dict]:
-    sql = """
-    SELECT id, username, assistant_name, comment, created_at
-    FROM public.support_comments
-    ORDER BY created_at DESC, id DESC;
-    """
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql)
-            rows = cur.fetchall()
-    return [dict(r) for r in rows]
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
 
-def get_comments_by_assistant(assistant_name: str) -> List[dict]:
-    sql = """
-    SELECT id, username, assistant_name, comment, created_at
-    FROM public.support_comments
-    WHERE assistant_name = %s
-    ORDER BY created_at DESC, id DESC;
-    """
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql, (assistant_name,))
-            rows = cur.fetchall()
-    return [dict(r) for r in rows]
+// Fallback base64 (compat si on vous en envoie encore)
+function cleanAndValidateBase64(imageData) {
+  if (imageData == null) throw new Error("imageData vide");
+  let base64Data = String(imageData);
+  if (base64Data.startsWith("data:image")) {
+    const idx = base64Data.indexOf(",");
+    base64Data = idx >= 0 ? base64Data.slice(idx + 1) : base64Data;
+  }
+  base64Data = base64Data.replace(/[\s\n\r\t]/g, "").replace(/[^A-Za-z0-9+/=]/g, "");
+  if (!base64Data) throw new Error("imageData après nettoyage est vide");
+  return base64Data;
+}
 
-# ========================= FASTAPI =========================
-app = FastAPI(title="Support Orchestrator API (Python)", version="4.0.0")
+// Téléchargement URL -> Buffer (gère redirections + timeout)
+function fetchUrlToBuffer(url) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith("https") ? https : http;
+    const req = client.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        const nextUrl = res.headers.location.startsWith("http")
+          ? res.headers.location
+          : new URL(res.headers.location, url).toString();
+        res.resume();
+        return resolve(fetchUrlToBuffer(nextUrl));
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        return reject(new Error(`HTTP ${res.statusCode} pour ${url}`));
+      }
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve(Buffer.concat(chunks)));
+    });
+    req.on("error", reject);
+    req.setTimeout(15000, () => req.destroy(new Error("Timeout téléchargement image")));
+  });
+}
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # adapter si besoin
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+// Chargement image depuis URL, chemin local, ou base64 (fallback)
+async function loadImageToBuffer({ imageUrl, imagePath, imageBase64 }) {
+  if (imageUrl) {
+    return await fetchUrlToBuffer(imageUrl);
+  }
+  if (imagePath) {
+    const full = path.resolve(imagePath);
+    if (!fs.existsSync(full)) {
+      throw new Error(
+        `Fichier image introuvable: ${full} (cwd=${process.cwd()}). Vérifie le déploiement et/ou utilise imageUrl.`
+      );
+    }
+    return fs.promises.readFile(full);
+  }
+  if (imageBase64) {
+    const cleaned = cleanAndValidateBase64(imageBase64);
+    return Buffer.from(cleaned, "base64");
+  }
+  throw new Error("Aucune source d'image fournie (imageUrl | imagePath | image base64).");
+}
 
-# ========================= MODELS =========================
-class SupportComment(BaseModel):
-    username: str
-    comment: str
-    assistant_name: str
+// Validation légère + logs magic bytes
+function validateImageBuffer(buffer) {
+  if (!buffer || !Buffer.isBuffer(buffer)) {
+    throw new Error("Image non Buffer");
+  }
+  if (buffer.length < 10) {
+    throw new Error(`Image trop petite (${buffer.length} octets)`);
+  }
+  const isPNG =
+    buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+  const isJPEG = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  const isGIF = buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46;
 
-class SubmitAndEmailRequest(BaseModel):
-    username: str
-    assistant_name: str
-    comment: str
+  console.log(
+    `Image validation - PNG:${isPNG}, JPEG:${isJPEG}, GIF:${isGIF} | Magic: ${buffer[0]
+      .toString(16)
+      .padStart(2, "0")} ${buffer[1].toString(16).padStart(2, "0")} ${buffer[2]
+      .toString(16)
+      .padStart(2, "0")} ${buffer[3].toString(16).padStart(2, "0")}`
+  );
 
-# ========================= STARTUP =========================
-@app.on_event("startup")
-async def startup_event():
-    try:
-        init_db()
-        app.state.init_db_error = None
-    except Exception as e:
-        app.state.init_db_error = str(e)
-        logger.exception("init_db failed")
+  if (!isPNG && !isJPEG && !isGIF) {
+    console.warn("⚠️ Format non reconnu — tentative avec PDFKit tout de même.");
+  }
+  return true;
+}
 
-# ========================= PDF (ReportLab, SANS images) =========================
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
+/**
+ * Normalise une image problématique pour PDFKit :
+ * - respect orientation EXIF
+ * - convertit en PNG (ou JPEG) propre
+ * - évite les marqueurs APP/JFIF exotiques
+ */
+async function normalizeImageBuffer(buffer, { format = "png" } = {}) {
+  const img = sharp(buffer, { failOn: "none" }).rotate();
+  if (format === "png") {
+    return await img.png({ compressionLevel: 9 }).toBuffer();
+  } else {
+    return await img.jpeg({ quality: 90, chromaSubsampling: "4:4:4" }).toBuffer();
+  }
+}
 
-def build_pdf_bytes(*, username: str, assistant_name: str, comment: str, subject_local: str) -> bytes:
-    """
-    Génère un PDF simple et propre, sans images.
-    """
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=36, rightMargin=36, topMargin=40, bottomMargin=40)
+/**
+ * Génère un PDF à partir d'un contenu structuré
+ * content = { title, introduction, sections:[{ title, content, imageUrl?, imagePath?, imageCaption?, image? (base64 fallback) }], conclusion }
+ */
+function generatePDF(content) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({
+        margin: 50,
+        size: "A4",
+        bufferPages: true,
+        info: { Title: content.title, Author: "Assistant GPT", Subject: content.title },
+      });
 
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("Title", parent=styles["Title"], textColor=colors.HexColor("#1e40af"))
-    h_style = ParagraphStyle("Heading", parent=styles["Heading2"], textColor=colors.HexColor("#1e40af"))
-    p_style = ParagraphStyle("Body", parent=styles["BodyText"], leading=14)
+      const chunks = [];
+      doc.on("data", (c) => chunks.push(c));
+      doc.on("end", () => resolve(Buffer.concat(chunks)));
+      doc.on("error", reject);
 
-    story = []
-    # Titre
-    story.append(Paragraph(f"Ticket Support — {assistant_name}", title_style))
-    story.append(Spacer(1, 8))
-    story.append(Table(
-        [[Paragraph(subject_local, styles["BodyText"])]],
-        style=TableStyle([
-            ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#e0e7ff")),
-            ("BOX", (0,0), (-1,-1), 1, colors.HexColor("#3b82f6")),
-            ("LEFTPADDING", (0,0), (-1,-1), 8),
-            ("RIGHTPADDING",(0,0), (-1,-1), 8),
-            ("TOPPADDING",  (0,0), (-1,-1), 6),
-            ("BOTTOMPADDING",(0,0), (-1,-1), 6),
-        ])
-    ))
-    story.append(Spacer(1, 12))
+      // En-tête
+      doc.fontSize(26).font("Helvetica-Bold").fillColor("#1e40af").text(content.title, { align: "center" });
+      doc.moveDown(0.5);
+      doc.strokeColor("#3b82f6").lineWidth(2).moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
+      doc.moveDown();
 
-    # Introduction
-    now_str = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
-    story.append(Paragraph("Introduction", h_style))
-    story.append(Spacer(1, 4))
-    intro = f"Votre message a été reçu le {now_str}. Ce document résume la demande saisie via l’assistant « {assistant_name} »."
-    story.append(Paragraph(intro, p_style))
-    story.append(Spacer(1, 12))
+      // Date
+      doc
+        .fontSize(10)
+        .fillColor("#6b7280")
+        .font("Helvetica")
+        .text(
+          `Date: ${new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" })}`,
+          { align: "right" }
+        );
+      doc.moveDown(2);
 
-    # Résumé
-    story.append(Paragraph("Résumé du ticket", h_style))
-    story.append(Spacer(1, 4))
-    resume = f"• <b>Utilisateur</b> : {username}<br/>" \
-             f"• <b>Assistant</b> : {assistant_name}<br/>" \
-             f"• <b>Date</b> : {now_str}"
-    story.append(Paragraph(resume, p_style))
-    story.append(Spacer(1, 12))
+      // Introduction
+      if (content.introduction) {
+        doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Introduction");
+        doc.moveDown(0.5);
+        doc.fontSize(11).font("Helvetica").fillColor("#374151").text(content.introduction, { align: "justify", lineGap: 3 });
+        doc.moveDown(2);
+      }
 
-    # Commentaire
-    story.append(Paragraph("Commentaire", h_style))
-    story.append(Spacer(1, 4))
-    story.append(Paragraph((comment or "(vide)").replace("\n", "<br/>"), p_style))
-    story.append(Spacer(1, 16))
+      // Sections
+      if (Array.isArray(content.sections)) {
+        (async () => {
+          for (let index = 0; index < content.sections.length; index++) {
+            const section = content.sections[index];
 
-    # Conclusion
-    story.append(Paragraph("Conclusion", h_style))
-    story.append(Spacer(1, 4))
-    concl = "Notre équipe de support analysera ce ticket et reviendra vers vous dans les meilleurs délais. Merci pour votre retour."
-    story.append(Paragraph(concl, p_style))
+            if (doc.y > doc.page.height - 150) {
+              doc.addPage();
+            }
 
-    doc.build(story)
-    return buffer.getvalue()
+            doc.fontSize(14).font("Helvetica-Bold").fillColor("#1e40af").text(`${index + 1}. ${section.title || "Section"}`);
+            doc.moveDown(0.5);
 
-# ========================= EMAIL =========================
-def send_email_with_pdf(*, to: str, subject: str, html_body: str, pdf_bytes: bytes, pdf_filename: str):
-    if not to:
-        raise ValueError("Destinataire manquant")
-    msg = EmailMessage()
-    msg["From"] = f"{EMAIL_FROM_NAME} <{EMAIL_FROM}>"
-    msg["To"] = to
-    msg["Subject"] = subject
-    msg.set_content("Votre ticket support est joint en PDF.")
-    msg.add_alternative(html_body, subtype="html")
-    msg.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=pdf_filename)
+            if (section.content) {
+              doc.fontSize(11).font("Helvetica").fillColor("#374151").text(section.content, { align: "justify", lineGap: 3 });
+              doc.moveDown(1);
+            }
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as s:
-        # s.starttls()  # activer si votre infra l'exige
-        s.send_message(msg)
+            // Image via URL (prioritaire), sinon imagePath, sinon base64 "image"
+            if (section.imageUrl || section.imagePath || section.image) {
+              try {
+                console.log("=== Insertion image ===");
+                const buf = await loadImageToBuffer({
+                  imageUrl: section.imageUrl,
+                  imagePath: section.imagePath,
+                  imageBase64: section.image, // fallback legacy
+                });
 
-# ========================= ROUTES =========================
-@app.get("/")
-async def root():
-    return {
-        "name": "Support Orchestrator API (Python)",
-        "version": "4.0.0",
-        "status": "running",
-        "db": {"host": PG_HOST, "db": PG_DB, "user": PG_USER},
-        "smtp": {"host": SMTP_HOST, "port": SMTP_PORT, "from": EMAIL_FROM},
-        "default_recipient": DEFAULT_RECIPIENT,
-        "init_db_error": getattr(app.state, "init_db_error", None),
+                validateImageBuffer(buf);
+
+                const maxWidth = doc.page.width - 100;
+                const maxHeight = 300;
+
+                if (doc.y > doc.page.height - maxHeight - 100) {
+                  doc.addPage();
+                }
+
+                // Essai 1 : insertion normale
+                try {
+                  doc.image(buf, { fit: [maxWidth, maxHeight], align: "center" });
+                } catch (err1) {
+                  const m1 = String((err1 && (err1.message || err1.reason)) ?? err1);
+                  console.warn("Image insert error:", m1);
+
+                  // Essai 2 : width seulement
+                  try {
+                    doc.image(buf, { width: maxWidth, align: "center" });
+                  } catch (err2) {
+                    const m2 = String((err2 && (err2.message || err2.reason)) ?? err2);
+                    console.warn("Image insert retry (width) error:", m2);
+
+                    // Essai 3 : normalisation via sharp → PNG propre
+                    console.log("🧼 Normalisation image via sharp (PNG)...");
+                    const normalized = await normalizeImageBuffer(buf, { format: "png" });
+                    validateImageBuffer(normalized);
+                    doc.image(normalized, { fit: [maxWidth, maxHeight], align: "center" });
+                  }
+                }
+
+                doc.moveDown(1);
+                if (section.imageCaption) {
+                  doc.fontSize(9).fillColor("#6b7280").font("Helvetica-Oblique").text(section.imageCaption, { align: "center" });
+                  doc.moveDown(1);
+                }
+              } catch (imgError) {
+                const msg = (imgError && (imgError.message || imgError.reason)) ?? String(imgError);
+                console.error("❌ Erreur image:", msg);
+                doc.fontSize(10).fillColor("#ef4444").text("⚠️ Erreur lors du chargement de l'image", { align: "center" });
+                doc.fontSize(8).fillColor("#9ca3af").text(`(${msg})`, { align: "center" });
+                doc.moveDown(1);
+              }
+            }
+
+            doc.moveDown(1.5);
+          }
+
+          // Conclusion
+          if (content.conclusion) {
+            if (doc.y > doc.page.height - 150) {
+              doc.addPage();
+            }
+            doc.fontSize(16).font("Helvetica-Bold").fillColor("#1f2937").text("Conclusion");
+            doc.moveDown(0.5);
+            doc.fontSize(11).font("Helvetica").fillColor("#374151").text(content.conclusion, { align: "justify", lineGap: 3 });
+          }
+
+          // Numérotation
+          const range = doc.bufferedPageRange();
+          for (let i = 0; i < range.count; i++) {
+            doc.switchToPage(i);
+            const oldY = doc.y;
+            doc.fontSize(8).fillColor("#9ca3af");
+            doc.text(`Page ${i + 1} sur ${range.count}`, 50, doc.page.height - 50, {
+              align: "center",
+              lineBreak: false,
+              width: doc.page.width - 100,
+            });
+            if (i < range.count - 1) {
+              doc.switchToPage(i);
+              doc.y = oldY;
+            }
+          }
+
+          doc.end();
+        })().catch(reject);
+      } else {
+        doc.end();
+      }
+    } catch (err) {
+      console.error("Erreur génération PDF:", err && err.stack ? err.stack : String(err));
+      reject(err);
+    }
+  });
+}
+
+async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilename }) {
+  return transporter.sendMail({
+    from: { name: EMAIL_FROM_NAME, address: EMAIL_FROM },
+    to,
+    subject,
+    html: messageHtml,
+    attachments: [{ filename: pdfFilename, content: pdfBuffer, contentType: "application/pdf" }],
+  });
+}
+
+/* ============================ ROUTES ============================ */
+
+// Debug simple
+app.post("/api/echo", (req, res) => {
+  res.json({ ok: true, got: req.body || {} });
+});
+
+app.post("/api/generate-and-send", async (req, res) => {
+  try {
+    const { email, subject, reportContent } = req.body || {};
+
+    if (!email || !subject || !reportContent) {
+      return res.status(400).json({
+        success: false,
+        error: "Données manquantes",
+        details: "Envoyez email, subject, reportContent",
+      });
+    }
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ success: false, error: "Email invalide" });
+    }
+    if (
+      !reportContent.title ||
+      !reportContent.introduction ||
+      !Array.isArray(reportContent.sections) ||
+      !reportContent.conclusion
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "Structure du rapport invalide",
+      });
     }
 
-@app.get("/health")
-async def health():
-    return {"status": "healthy", "timestamp": datetime.datetime.utcnow().isoformat() + "Z"}
+    const pdfBuffer = await generatePDF(reportContent);
+    const pdfName = `rapport_${String(reportContent.title).replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf`;
 
-@app.post("/api/echo")
-async def echo(body: Optional[dict] = Body(default=None)):
-    return {"ok": True, "got": body or {}}
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <body style="font-family: Arial, sans-serif; line-height:1.6; color:#111827;">
+          <h2 style="margin:0 0 8px 0;">📄 Votre rapport est prêt</h2>
+          <div style="background:#e0e7ff;padding:12px;border-left:4px solid #667eea;border-radius:6px;margin:12px 0;">
+            <strong>📊 Sujet :</strong> ${escapeHtml(subject)}<br>
+            <strong>📌 Titre :</strong> ${escapeHtml(reportContent.title)}<br>
+            <strong>📅 Date :</strong> ${new Date().toLocaleDateString("fr-FR")}
+          </div>
+          <p>Vous trouverez le rapport complet en pièce jointe au format PDF.</p>
+          <p style="color:#6b7280;font-size:12px">© ${new Date().getFullYear()} ${EMAIL_FROM_NAME}</p>
+        </body>
+      </html>
+    `;
 
-# --- CRUD minimal lecture (optionnel) ---
-@app.get("/api/support")
-async def get_all_support_comments_route():
-    try:
-        return {"success": True, "comments": get_all_comments()}
-    except Exception as e:
-        logger.exception("get_all_support_comments error")
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération: {str(e)}")
+    await sendEmailWithPdf({
+      to: email,
+      subject: `Rapport : ${reportContent.title}`,
+      messageHtml: html,
+      pdfBuffer,
+      pdfFilename: pdfName,
+    });
 
-@app.get("/api/support/{assistant_name}")
-async def get_support_comments_by_assistant_route(assistant_name: str):
-    try:
-        return {"success": True, "assistant_name": assistant_name, "comments": get_comments_by_assistant(assistant_name.strip())}
-    except Exception as e:
-        logger.exception("get_support_comments_by_assistant error")
-        raise HTTPException(status_code=500, detail=f"Erreur lors de la récupération: {str(e)}")
+    return res.json({
+      success: true,
+      message: "Rapport généré et envoyé avec succès",
+      details: {
+        email,
+        pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
+      },
+    });
+  } catch (err) {
+    console.error("❌ Erreur:", err && err.stack ? err.stack : String(err));
+    return res.status(500).json({
+      success: false,
+      error: "Erreur lors du traitement",
+      details: (err && err.message) ?? String(err),
+    });
+  }
+});
 
-@app.post("/api/support")
-async def create_support_comment_route(comment: SupportComment):
-    try:
-        new_id = save_support_comment(
-            username=comment.username.strip(),
-            assistant_name=comment.assistant_name.strip(),
-            comment=comment.comment,
-        )
-        return {"success": True, "message": "Commentaire enregistré avec succès", "comment_id": new_id}
-    except Exception as e:
-        logger.exception("create_support_comment error")
-        raise HTTPException(status_code=500, detail=f"Erreur lors de l'enregistrement: {str(e)}")
+// Test image (accepte imageUrl ou imageData base64 legacy)
+app.post("/api/test-image", async (req, res) => {
+  try {
+    const { imageUrl, imageData } = req.body || {};
 
-# --- ORCHESTRATEUR: ENREGISTRE + PDF (sans images) + EMAIL ---
-@app.post("/api/support/submit-and-email")
-async def submit_support_and_email(payload: SubmitAndEmailRequest = Body(...)):
-    """
-    1) Enregistre le commentaire
-    2) Génère un PDF SANS images
-    3) Envoie un e-mail au destinataire forcé
-    4) Renvoie les infos
-    """
-    try:
-        # (1) DB
-        comment_id = save_support_comment(
-            username=payload.username.strip(),
-            assistant_name=payload.assistant_name.strip(),
-            comment=payload.comment,
-        )
+    let buffer;
+    if (imageUrl) {
+      buffer = await fetchUrlToBuffer(imageUrl);
+    } else if (imageData) {
+      const cleanedBase64 = cleanAndValidateBase64(imageData);
+      buffer = Buffer.from(cleanedBase64, "base64");
+    } else {
+      return res.status(400).json({ error: "Fournir imageUrl ou imageData" });
+    }
 
-        # Sujet auto
-        subject_local = f"Ticket Support — {payload.assistant_name.strip()}"
+    try {
+      validateImageBuffer(buffer);
+    } catch (validationError) {
+      return res.status(400).json({ error: validationError.message });
+    }
 
-        # (2) PDF
-        pdf_bytes = build_pdf_bytes(
-            username=payload.username.strip(),
-            assistant_name=payload.assistant_name.strip(),
-            comment=payload.comment,
-            subject_local=subject_local
-        )
-        pdf_filename = f"ticket_support_{payload.assistant_name.strip().lower().replace(' ', '_')}_{int(datetime.datetime.now().timestamp())}.pdf"
+    // Type
+    let type = "inconnu";
+    if (buffer[0] === 0xff && buffer[1] === 0xd8) type = "JPEG";
+    else if (buffer[0] === 0x89 && buffer[1] === 0x50) type = "PNG";
+    else if (buffer[0] === 0x47 && buffer[1] === 0x49) type = "GIF";
 
-        # (3) Email
-        html = f"""
-        <!DOCTYPE html>
-        <html>
-          <body style="font-family: Arial, sans-serif; line-height:1.6; color:#111827;">
-            <h2 style="margin:0 0 8px 0;">🆘 Ticket Support</h2>
-            <div style="background:#fef3c7;padding:12px;border-left:4px solid #f59e0b;border-radius:6px;margin:12px 0;">
-              <strong>👤 Utilisateur :</strong> {payload.username}<br>
-              <strong>🤖 Assistant :</strong> {payload.assistant_name}<br>
-              <strong>🕒 Date :</strong> {datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}
-            </div>
-            <p>Le ticket est joint en PDF.</p>
-            <p style="color:#6b7280;font-size:12px">© {datetime.datetime.now().year} {EMAIL_FROM_NAME}</p>
-          </body>
-        </html>
-        """
-        send_email_with_pdf(
-            to=DEFAULT_RECIPIENT,              # destinataire FORCÉ
-            subject=subject_local,             # sujet auto
-            html_body=html,
-            pdf_bytes=pdf_bytes,
-            pdf_filename=pdf_filename
-        )
+    // Peut-on normaliser ?
+    let normalizedOk = false;
+    try {
+      const norm = await normalizeImageBuffer(buffer, { format: "png" });
+      if (norm && norm.length > 10) normalizedOk = true;
+    } catch (_e) {}
 
-        # (4) Réponse
-        return {
-            "success": True,
-            "message": "Commentaire enregistré, PDF généré et e-mail envoyé",
-            "ticket": {
-                "id": comment_id,
-                "username": payload.username,
-                "assistant_name": payload.assistant_name,
-                "created_at": datetime.datetime.utcnow().isoformat() + "Z"
-            },
-            "email": {
-                "to": DEFAULT_RECIPIENT,
-                "subject": subject_local,
-                "pdf_title": f"Ticket Support — {payload.assistant_name}",
-                "pdf_size_kb": f"{len(pdf_bytes)/1024:.2f} KB"
-            }
-        }
+    return res.json({
+      success: true,
+      imageType: type,
+      size: `${(buffer.length / 1024).toFixed(2)} KB`,
+      sizeBytes: buffer.length,
+      magicBytes: `${buffer[0].toString(16).padStart(2, "0")} ${buffer[1]
+        .toString(16)
+        .padStart(2, "0")} ${buffer[2].toString(16).padStart(2, "0")} ${buffer[3]
+        .toString(16)
+        .padStart(2, "0")}`,
+      normalizedPreviewPossible: normalizedOk,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: (err && err.message) ?? String(err) });
+  }
+});
 
-    except Exception as e:
-        logger.exception("submit_support_and_email error")
-        raise HTTPException(status_code=500, detail=f"submit-and-email error: {e}")
+app.get("/health", (_req, res) => {
+  res.json({
+    status: "OK",
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
+    service: "PDF Report API",
+  });
+});
 
-# ========================= MAIN (local) =========================
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
+app.get("/", (_req, res) => {
+  res.json({
+    name: "GPT PDF Email API",
+    version: "1.0.0",
+    status: "running",
+    endpoints: {
+      health: "GET /health",
+      echo: "POST /api/echo",
+      testImage: "POST /api/test-image",
+      generateAndSend: "POST /api/generate-and-send",
+      static: "GET /static/<fichier>", // ex: /static/img.png
+    },
+  });
+});
+
+/* ========================= 404 & ERREUR ======================== */
+app.use((req, res) => res.status(404).json({ error: "Route non trouvée", path: req.path }));
+app.use((err, _req, res, _next) => {
+  console.error("Erreur middleware:", err && err.stack ? err.stack : String(err));
+  res.status(500).json({ error: "Erreur serveur", message: (err && err.message) ?? String(err) });
+});
+
+/* ============================ START ============================ */
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 API démarrée sur port ${PORT}`);
+});
+
+/* ========================= PROCESS HOOKS ======================= */
+process.on("unhandledRejection", (r) =>
+  console.error("Unhandled Rejection:", r && r.stack ? r.stack : String(r))
+);
+process.on("uncaughtException", (e) => {
+  console.error("Uncaught Exception:", e && e.stack ? e.stack : String(e));
+  process.exit(1);
+});
