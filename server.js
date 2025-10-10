@@ -1,16 +1,5 @@
 "use strict";
 
-/**
- * GPT PDF Email API — complet
- * - /health
- * - /api/echo
- * - /api/test-image
- * - /api/generate-and-send                 (génération PDF générique)
- * - /api/generate-support-ticket           (NOUVEAU : ticket support -> PDF + email)
- *
- * Déploiement Azure App Service OK
- */
-
 const express = require("express");
 const PDFDocument = require("pdfkit");
 const nodemailer = require("nodemailer");
@@ -23,17 +12,11 @@ const sharp = require("sharp"); // normalisation d'images
 
 const app = express();
 
-/* ========================= CONFIG ========================= */
-// SMTP par défaut (EOP)
-const SMTP_HOST = process.env.SMTP_HOST || "avocarbon-com.mail.protection.outlook.com";
-const SMTP_PORT = Number(process.env.SMTP_PORT || 25);
-const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "Administration STS";
-const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
-
-// Optionnel si vous avez un relais SMTP authentifié
-const SMTP_SECURE = process.env.SMTP_SECURE === "true"; // false par défaut
-const SMTP_USER = process.env.SMTP_USER || ""; // vide = pas d'auth
-const SMTP_PASS = process.env.SMTP_PASS || ""; // vide = pas d'auth
+/* ========================= CONFIG FIXE ========================= */
+const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
+const SMTP_PORT = 25;
+const EMAIL_FROM_NAME = "Administration STS";
+const EMAIL_FROM = "administration.STS@avocarbon.com";
 
 /* ========================= MIDDLEWARES ========================= */
 app.use(express.json({ limit: "50mb" }));
@@ -64,20 +47,15 @@ app.use((req, _res, next) => {
 });
 
 /* ====================== TRANSPORTEUR SMTP ====================== */
-const transporterOptions = {
+const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
-  secure: SMTP_SECURE, // false si 25/587 sans STARTTLS explicite
+  secure: false,
   tls: { minVersion: "TLSv1.2" },
-};
-if (SMTP_USER && SMTP_PASS) {
-  transporterOptions.auth = { user: SMTP_USER, pass: SMTP_PASS };
-}
-const transporter = nodemailer.createTransport(transporterOptions);
-
+});
 transporter
   .verify()
-  .then(() => console.log("✅ SMTP prêt:", SMTP_HOST, "port", SMTP_PORT))
+  .then(() => console.log("✅ SMTP EOP prêt"))
   .catch((err) =>
     console.error("❌ SMTP erreur:", err && err.message ? err.message : String(err))
   );
@@ -143,7 +121,7 @@ async function loadImageToBuffer({ imageUrl, imagePath, imageBase64 }) {
     const full = path.resolve(imagePath);
     if (!fs.existsSync(full)) {
       throw new Error(
-        `Fichier image introuvable: ${full} (cwd=${process.cwd()}). Utilisez plutôt imageUrl.`
+        `Fichier image introuvable: ${full} (cwd=${process.cwd()}). Vérifie le déploiement et/ou utilise imageUrl.`
       );
     }
     return fs.promises.readFile(full);
@@ -163,7 +141,8 @@ function validateImageBuffer(buffer) {
   if (buffer.length < 10) {
     throw new Error(`Image trop petite (${buffer.length} octets)`);
   }
-  const isPNG = buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
+  const isPNG =
+    buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47;
   const isJPEG = buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
   const isGIF = buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46;
 
@@ -184,7 +163,8 @@ function validateImageBuffer(buffer) {
 /**
  * Normalise une image problématique pour PDFKit :
  * - respect orientation EXIF
- * - convertit en PNG/JPEG propre
+ * - convertit en PNG (ou JPEG) propre
+ * - évite les marqueurs APP/JFIF exotiques
  */
 async function normalizeImageBuffer(buffer, { format = "png" } = {}) {
   const img = sharp(buffer, { failOn: "none" }).rotate();
@@ -195,14 +175,9 @@ async function normalizeImageBuffer(buffer, { format = "png" } = {}) {
   }
 }
 
-/* ============================ PDF ============================ */
 /**
  * Génère un PDF à partir d'un contenu structuré
- * content = {
- *   title, introduction,
- *   sections:[{ title, content, imageUrl?, imagePath?, imageCaption?, image? (base64) }],
- *   conclusion
- * }
+ * content = { title, introduction, sections:[{ title, content, imageUrl?, imagePath?, imageCaption?, image? (base64 fallback) }], conclusion }
  */
 function generatePDF(content) {
   return new Promise((resolve, reject) => {
@@ -220,7 +195,7 @@ function generatePDF(content) {
       doc.on("error", reject);
 
       // En-tête
-      doc.fontSize(26).font("Helvetica-Bold").fillColor("#1e40af").text(content.title || "Rapport", { align: "center" });
+      doc.fontSize(26).font("Helvetica-Bold").fillColor("#1e40af").text(content.title, { align: "center" });
       doc.moveDown(0.5);
       doc.strokeColor("#3b82f6").lineWidth(2).moveTo(50, doc.y).lineTo(doc.page.width - 50, doc.y).stroke();
       doc.moveDown();
@@ -265,6 +240,7 @@ function generatePDF(content) {
             // Image via URL (prioritaire), sinon imagePath, sinon base64 "image"
             if (section.imageUrl || section.imagePath || section.image) {
               try {
+                console.log("=== Insertion image ===");
                 const buf = await loadImageToBuffer({
                   imageUrl: section.imageUrl,
                   imagePath: section.imagePath,
@@ -368,49 +344,82 @@ async function sendEmailWithPdf({ to, subject, messageHtml, pdfBuffer, pdfFilena
   });
 }
 
-/* ============================ BUILDERS ============================ */
-// Construit un contenu PDF “joli” pour un ticket Support
-function buildSupportReport({ username, assistant_name, comment, subject }) {
-  const now = new Date();
-  const nowStr =
-    now.toLocaleDateString("fr-FR", { year: "numeric", month: "long", day: "numeric" }) +
-    " " +
-    now.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
-
-  const title = `Ticket Support — ${assistant_name}`;
-  const introduction = `Votre message a été reçu le ${nowStr}. Ce document résume la demande saisie via l’assistant « ${assistant_name} ».`;
-  const sections = [
-    {
-      title: "Résumé du ticket",
-      content:
-        `• Utilisateur : ${username}\n` +
-        `• Assistant  : ${assistant_name}\n` +
-        `• Date       : ${nowStr}\n`,
-      // imageUrl: "https://pdf-api.azurewebsites.net/static/img.png",
-      // imageCaption: "Support AVOCarbon"
-    },
-    {
-      title: "Commentaire",
-      content: comment || "(vide)"
-    }
-  ];
-  const conclusion =
-    "Notre équipe de support analysera ce ticket et reviendra vers vous dans les meilleurs délais. Merci pour votre retour.";
-
-  return {
-    title,
-    introduction,
-    sections,
-    conclusion,
-    subject: subject || `Ticket Support — ${assistant_name}`,
-  };
-}
-
 /* ============================ ROUTES ============================ */
 
 // Debug simple
 app.post("/api/echo", (req, res) => {
   res.json({ ok: true, got: req.body || {} });
+});
+
+app.post("/api/generate-and-send", async (req, res) => {
+  try {
+    const { email, subject, reportContent } = req.body || {};
+
+    if (!email || !subject || !reportContent) {
+      return res.status(400).json({
+        success: false,
+        error: "Données manquantes",
+        details: "Envoyez email, subject, reportContent",
+      });
+    }
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ success: false, error: "Email invalide" });
+    }
+    if (
+      !reportContent.title ||
+      !reportContent.introduction ||
+      !Array.isArray(reportContent.sections) ||
+      !reportContent.conclusion
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "Structure du rapport invalide",
+      });
+    }
+
+    const pdfBuffer = await generatePDF(reportContent);
+    const pdfName = `rapport_${String(reportContent.title).replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf`;
+
+    const html = `
+      <!DOCTYPE html>
+      <html>
+        <body style="font-family: Arial, sans-serif; line-height:1.6; color:#111827;">
+          <h2 style="margin:0 0 8px 0;">📄 Votre rapport est prêt</h2>
+          <div style="background:#e0e7ff;padding:12px;border-left:4px solid #667eea;border-radius:6px;margin:12px 0;">
+            <strong>📊 Sujet :</strong> ${escapeHtml(subject)}<br>
+            <strong>📌 Titre :</strong> ${escapeHtml(reportContent.title)}<br>
+            <strong>📅 Date :</strong> ${new Date().toLocaleDateString("fr-FR")}
+          </div>
+          <p>Vous trouverez le rapport complet en pièce jointe au format PDF.</p>
+          <p style="color:#6b7280;font-size:12px">© ${new Date().getFullYear()} ${EMAIL_FROM_NAME}</p>
+        </body>
+      </html>
+    `;
+
+    await sendEmailWithPdf({
+      to: email,
+      subject: `Rapport : ${reportContent.title}`,
+      messageHtml: html,
+      pdfBuffer,
+      pdfFilename: pdfName,
+    });
+
+    return res.json({
+      success: true,
+      message: "Rapport généré et envoyé avec succès",
+      details: {
+        email,
+        pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
+      },
+    });
+  } catch (err) {
+    console.error("❌ Erreur:", err && err.stack ? err.stack : String(err));
+    return res.status(500).json({
+      success: false,
+      error: "Erreur lors du traitement",
+      details: (err && err.message) ?? String(err),
+    });
+  }
 });
 
 // Test image (accepte imageUrl ou imageData base64 legacy)
@@ -464,164 +473,6 @@ app.post("/api/test-image", async (req, res) => {
   }
 });
 
-/**
- * Endpoint générique : prend { email, subject, reportContent{title,introduction,sections[],conclusion} }
- * et envoie le PDF par email.
- */
-app.post("/api/generate-and-send", async (req, res) => {
-  try {
-    const { email, subject, reportContent } = req.body || {};
-
-    if (!email || !subject || !reportContent) {
-      return res.status(400).json({
-        success: false,
-        error: "Données manquantes",
-        details: "Envoyez email, subject, reportContent",
-      });
-    }
-    if (!isValidEmail(email)) {
-      return res.status(400).json({ success: false, error: "Email invalide" });
-    }
-    if (
-      !reportContent.title ||
-      !reportContent.introduction ||
-      !Array.isArray(reportContent.sections) ||
-      !reportContent.conclusion
-    ) {
-      return res.status(400).json({
-        success: false,
-        error: "Structure du rapport invalide",
-      });
-    }
-
-    const pdfBuffer = await generatePDF(reportContent);
-    const pdfName = `rapport_${String(reportContent.title).replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf`;
-
-    const html = `
-      <!DOCTYPE html>
-      <html>
-        <body style="font-family: Arial, sans-serif; line-height:1.6; color:#111827;">
-          <h2 style="margin:0 0 8px 0;">📄 Votre rapport est prêt</h2>
-          <div style="background:#e0e7ff;padding:12px;border-left:4px solid #667eea;border-radius:6px;margin:12px 0;">
-            <strong>📊 Sujet :</strong> ${escapeHtml(subject)}<br>
-            <strong>📌 Titre :</strong> ${escapeHtml(reportContent.title)}<br>
-            <strong>📅 Date :</strong> ${new Date().toLocaleDateString("fr-FR")}
-          </div>
-          <p>Vous trouverez le rapport complet en pièce jointe au format PDF.</p>
-          <p style="color:#6b7280;font-size:12px">© ${new Date().getFullYear()} ${escapeHtml(EMAIL_FROM_NAME)}</p>
-        </body>
-      </html>
-    `;
-
-    await sendEmailWithPdf({
-      to: email,
-      subject: `Rapport : ${reportContent.title}`,
-      messageHtml: html,
-      pdfBuffer,
-      pdfFilename: pdfName,
-    });
-
-    return res.json({
-      success: true,
-      message: "Rapport généré et envoyé avec succès",
-      details: {
-        email,
-        pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
-      },
-    });
-  } catch (err) {
-    console.error("❌ Erreur:", err && err.stack ? err.stack : String(err));
-    return res.status(500).json({
-      success: false,
-      error: "Erreur lors du traitement",
-      details: (err && err.message) ?? String(err),
-    });
-  }
-});
-
-/**
- * NOUVEAU : Endpoint spécialisé Support
- * Prend { username, assistant_name, comment, email_to, subject }
- * Construit un rapport de ticket “propre”, génère le PDF et l’envoie.
- */
-app.post("/api/generate-support-ticket", async (req, res) => {
-  try {
-    const { username, assistant_name, comment, email_to, subject } = req.body || {};
-
-    if (!username || !assistant_name || !comment || !email_to) {
-      return res.status(400).json({
-        success: false,
-        error: "Données manquantes",
-        details: "Envoyez username, assistant_name, comment, email_to (+ subject facultatif)",
-      });
-    }
-    if (!isValidEmail(email_to)) {
-      return res.status(400).json({ success: false, error: "Email destinataire invalide" });
-    }
-
-    // Construire un rapport “joli”
-    const supportReport = buildSupportReport({
-      username: String(username).trim(),
-      assistant_name: String(assistant_name).trim(),
-      comment: String(comment),
-      subject: subject && String(subject).trim(),
-    });
-
-    const reportContent = {
-      title: supportReport.title,
-      introduction: supportReport.introduction,
-      sections: supportReport.sections,
-      conclusion: supportReport.conclusion,
-    };
-
-    // Générer PDF
-    const pdfBuffer = await generatePDF(reportContent);
-    const pdfName = `ticket_support_${String(assistant_name).replace(/[^a-z0-9]/gi, "_").toLowerCase()}_${Date.now()}.pdf`;
-
-    // Email HTML
-    const html = `
-      <!DOCTYPE html>
-      <html>
-        <body style="font-family: Arial, sans-serif; line-height:1.6; color:#111827;">
-          <h2 style="margin:0 0 8px 0;">🆘 Ticket Support</h2>
-          <div style="background:#fef3c7;padding:12px;border-left:4px solid #f59e0b;border-radius:6px;margin:12px 0;">
-            <strong>👤 Utilisateur :</strong> ${escapeHtml(username)}<br>
-            <strong>🤖 Assistant :</strong> ${escapeHtml(assistant_name)}<br>
-            <strong>🕒 Date :</strong> ${new Date().toLocaleString("fr-FR")}
-          </div>
-          <p>Le ticket est joint en PDF.</p>
-          <p style="color:#6b7280;font-size:12px">© ${new Date().getFullYear()} ${escapeHtml(EMAIL_FROM_NAME)}</p>
-        </body>
-      </html>
-    `;
-
-    await sendEmailWithPdf({
-      to: email_to,
-      subject: supportReport.subject,
-      messageHtml: html,
-      pdfBuffer,
-      pdfFilename: pdfName,
-    });
-
-    return res.json({
-      success: true,
-      message: "Ticket Support généré et envoyé avec succès",
-      details: {
-        to: email_to,
-        subject: supportReport.subject,
-        pdfSize: `${(pdfBuffer.length / 1024).toFixed(2)} KB`,
-      },
-    });
-  } catch (err) {
-    console.error("❌ Erreur /api/generate-support-ticket:", err && err.stack ? err.stack : String(err));
-    return res.status(500).json({
-      success: false,
-      error: "Erreur lors du traitement du ticket support",
-      details: (err && err.message) ?? String(err),
-    });
-  }
-});
-
 app.get("/health", (_req, res) => {
   res.json({
     status: "OK",
@@ -634,14 +485,13 @@ app.get("/health", (_req, res) => {
 app.get("/", (_req, res) => {
   res.json({
     name: "GPT PDF Email API",
-    version: "1.1.0",
+    version: "1.0.0",
     status: "running",
     endpoints: {
       health: "GET /health",
       echo: "POST /api/echo",
       testImage: "POST /api/test-image",
       generateAndSend: "POST /api/generate-and-send",
-      generateSupportTicket: "POST /api/generate-support-ticket",
       static: "GET /static/<fichier>", // ex: /static/img.png
     },
   });
@@ -657,7 +507,7 @@ app.use((err, _req, res, _next) => {
 /* ============================ START ============================ */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 PDF API démarrée sur port ${PORT}`);
+  console.log(`🚀 API démarrée sur port ${PORT}`);
 });
 
 /* ========================= PROCESS HOOKS ======================= */
