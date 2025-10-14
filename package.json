@@ -12,7 +12,7 @@
     "api",
     "photos"
   ],
-  "author": "Votre Nom",
+  "author": "Majed Messai",
   "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
