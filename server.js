@@ -118,6 +118,9 @@ app.post('/send-email-base64', async (req, res) => {
     const imagePath = saveBase64Image(imageBase64, filename);
     console.log(`Image base64 décodée et sauvegardée: ${imagePath}`);
 
+    // Lire l'image en buffer
+    const imageBuffer = fs.readFileSync(imagePath);
+    
     // Configuration de l'email
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
@@ -129,14 +132,15 @@ app.post('/send-email-base64', async (req, res) => {
           <p>${message}</p>
           <br>
           <p>Image jointe ci-dessous:</p>
-          <img src="cid:attached-image" style="max-width: 600px; height: auto;">
+          <img src="cid:attached-image" style="max-width: 600px; height: auto; display: block;">
         </div>
       `,
       attachments: [
         {
           filename: filename,
-          path: imagePath,
-          cid: 'attached-image'
+          content: imageBuffer,
+          cid: 'attached-image',
+          contentDisposition: 'inline'
         }
       ]
     };
