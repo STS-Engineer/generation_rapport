@@ -118,9 +118,8 @@ app.post('/send-email-base64', async (req, res) => {
     const imagePath = saveBase64Image(imageBase64, filename);
     console.log(`Image base64 décodée et sauvegardée: ${imagePath}`);
 
-    // Lire l'image en buffer et encoder en base64
+    // Lire l'image en buffer
     const imageBuffer = fs.readFileSync(imagePath);
-    const base64Image = imageBuffer.toString('base64');
     
     // Déterminer le type MIME
     const ext = path.extname(filename).toLowerCase();
@@ -132,26 +131,37 @@ app.post('/send-email-base64', async (req, res) => {
     };
     const mimeType = mimeTypes[ext] || 'image/png';
     
-    // Configuration de l'email avec image embedée en base64
+    // Configuration de l'email avec CID reference
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
       to: to,
       subject: subject,
       html: `
         <div style="font-family: Arial, sans-serif; padding: 20px;">
-          <h2>${subject}</h2>
-          <p>${message}</p>
+          <h2 style="color: #333;">${subject}</h2>
+          <p style="font-size: 14px; line-height: 1.6;">${message}</p>
           <br>
-          <p>Image jointe ci-dessous:</p>
-          <img src="data:${mimeType};base64,${base64Image}" style="max-width: 600px; height: auto; display: block; border: 1px solid #ddd; padding: 5px;">
+          <div style="margin: 20px 0;">
+            <p style="font-weight: bold; margin-bottom: 10px;">Image jointe ci-dessous:</p>
+            <img src="cid:uniqueImageCID@nodemailer" alt="Image" style="max-width: 100%; height: auto; display: block; border: 2px solid #ddd; border-radius: 4px; padding: 5px; background: #f9f9f9;">
+          </div>
+          <br>
+          <p style="font-size: 12px; color: #666;">Si l'image ne s'affiche pas, veuillez consulter la pièce jointe.</p>
         </div>
       `,
       attachments: [
         {
           filename: filename,
-          content: base64Image,
-          encoding: 'base64',
-          contentType: mimeType
+          content: imageBuffer,
+          contentType: mimeType,
+          cid: 'uniqueImageCID@nodemailer',
+          contentDisposition: 'inline'
+        },
+        {
+          filename: filename,
+          content: imageBuffer,
+          contentType: mimeType,
+          contentDisposition: 'attachment'
         }
       ]
     };
@@ -208,10 +218,21 @@ app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
 
     console.log(`Image sauvegardée: ${imagePath}`);
 
-    // Lire l'image en buffer
+    // Lire l'image en buffer et encoder en base64
     const imageBuffer = fs.readFileSync(imagePath);
+    const base64Image = imageBuffer.toString('base64');
+    
+    // Déterminer le type MIME
+    const ext = path.extname(imageName).toLowerCase();
+    const mimeTypes = {
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif'
+    };
+    const mimeType = mimeTypes[ext] || 'image/png';
 
-    // Configuration de l'email
+    // Configuration de l'email avec image embedée en base64
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
       to: to,
@@ -222,15 +243,15 @@ app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
           <p>${message}</p>
           <br>
           <p>Image jointe ci-dessous:</p>
-          <img src="cid:attached-image" style="max-width: 600px; height: auto; display: block;">
+          <img src="data:${mimeType};base64,${base64Image}" style="max-width: 600px; height: auto; display: block; border: 1px solid #ddd; padding: 5px;">
         </div>
       `,
       attachments: [
         {
           filename: imageName,
-          content: imageBuffer,
-          cid: 'attached-image',
-          contentDisposition: 'inline'
+          content: base64Image,
+          encoding: 'base64',
+          contentType: mimeType
         }
       ]
     };
