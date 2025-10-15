@@ -16,11 +16,9 @@ const EMAIL_FROM = "administration.STS@avocarbon.com";
 
 // Créer le dossier images
 const imagesDir = path.join(__dirname, 'images');
-if (!fs.existsSync(imagesDir)) {
-  fs.mkdirSync(imagesDir, { recursive: true });
-}
+if (!fs.existsSync(imagesDir)) fs.mkdirSync(imagesDir, { recursive: true });
 
-// Middleware (JSON recommandé pour /send-email-base64)
+// Middleware
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -32,16 +30,13 @@ const storage = multer.diskStorage({
     cb(null, uniqueSuffix + path.extname(file.originalname));
   }
 });
-
 const upload = multer({
-  storage: storage,
+  storage,
   limits: { fileSize: 50 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|gif|bmp|webp/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
-    if (mimetype && extname) cb(null, true);
-    else cb(new Error('Format non supporté'));
+    const allowed = /jpeg|jpg|png|gif|bmp|webp/;
+    const ok = allowed.test(path.extname(file.originalname).toLowerCase()) && allowed.test(file.mimetype);
+    ok ? cb(null, true) : cb(new Error('Format non supporté'));
   }
 });
 
@@ -50,23 +45,20 @@ const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
   secure: false,
-  tls: { rejectUnauthorized: false } // O365 EOP accepte STARTTLS sur 25
+  tls: { rejectUnauthorized: false }
 });
-
-transporter.verify((error) => {
-  if (error) console.log('✗ SMTP Error:', error.message);
+transporter.verify(err => {
+  if (err) console.log('✗ SMTP Error:', err.message);
   else console.log('✓ SMTP Ready');
 });
 
 /* ========================= HELPERS ========================= */
-
-// Normalisation Base64 (corrige espaces, base64url, CR/LF, padding)
+// Normalisation Base64 (gère %xx, +, base64url, CR/LF, padding)
 function normalizeBase64Payload(raw) {
   if (!raw || typeof raw !== 'string') throw new Error('Payload Base64 manquante');
+  let b64 = raw.trim();
 
-  let b64 = raw;
-
-  // Détacher éventuel prefixe data:...;base64,
+  // Extraire dataURL si présent
   if (b64.startsWith('data:')) {
     const m = b64.match(/^data:([^;]+);base64,(.*)$/);
     if (m) b64 = m[2];
@@ -74,16 +66,24 @@ function normalizeBase64Payload(raw) {
     b64 = b64.split('base64,').pop();
   }
 
-  // 1) cas x-www-form-urlencoded: remettre les '+'
+  // Si on a encore du %xx (url-encoded), décoder
+  if (/%[0-9A-Fa-f]{2}/.test(b64)) {
+    try { b64 = decodeURIComponent(b64); } catch (_) { /* ignore */ }
+  }
+
+  // Forms urlencoded : espaces => '+'
   b64 = b64.replace(/ /g, '+');
 
-  // 2) tolérer base64url -> base64
+  // base64url -> base64
   b64 = b64.replace(/-/g, '+').replace(/_/g, '/');
 
-  // 3) retirer CR/LF (ne pas supprimer d’autres chars)
-  b64 = b64.replace(/\r?\n/g, '');
+  // Retirer CR/LF/TAB
+  b64 = b64.replace(/[\r\n\t]/g, '');
 
-  // 4) padding
+  // Nettoyage final (tolérant)
+  b64 = b64.replace(/[^A-Za-z0-9+/=]/g, '');
+
+  // Padding
   const mod = b64.length % 4;
   if (mod === 2) b64 += '==';
   else if (mod === 3) b64 += '=';
@@ -94,16 +94,11 @@ function normalizeBase64Payload(raw) {
 
 // Détection type via magic number
 function sniffImageType(buffer) {
-  const magic = buffer.slice(0, 8);
-  if (magic[0] === 0x89 && magic[1] === 0x50 && magic[2] === 0x4E && magic[3] === 0x47) {
-    return { type: 'image/png', ext: '.png' };
-  } else if (magic[0] === 0xFF && magic[1] === 0xD8 && magic[2] === 0xFF) {
-    return { type: 'image/jpeg', ext: '.jpg' };
-  } else if (magic[0] === 0x47 && magic[1] === 0x49 && magic[2] === 0x46) {
-    return { type: 'image/gif', ext: '.gif' };
-  } else if (magic[0] === 0x42 && magic[1] === 0x4D) {
-    return { type: 'image/bmp', ext: '.bmp' };
-  }
+  const m = buffer.slice(0, 8);
+  if (m[0] === 0x89 && m[1] === 0x50 && m[2] === 0x4E && m[3] === 0x47) return { type: 'image/png', ext: '.png' };
+  if (m[0] === 0xFF && m[1] === 0xD8 && m[2] === 0xFF) return { type: 'image/jpeg', ext: '.jpg' };
+  if (m[0] === 0x47 && m[1] === 0x49 && m[2] === 0x46) return { type: 'image/gif', ext: '.gif' };
+  if (m[0] === 0x42 && m[1] === 0x4D) return { type: 'image/bmp', ext: '.bmp' };
   return { type: 'unknown', ext: '.bin' };
 }
 
@@ -114,35 +109,28 @@ function decodeAndSaveImage(base64String, filename) {
     console.log(`Input length: ${base64String?.length ?? 0} chars`);
 
     const b64 = normalizeBase64Payload(base64String);
-    console.log(`Normalized length: ${b64.length} chars`);
+    const estBytes = Math.floor((b64.replace(/=+$/, '').length * 3) / 4);
+    console.log(`Normalized length: ${b64.length} chars (≈${estBytes} bytes attendus)`);
 
     const buffer = Buffer.from(b64, 'base64');
     console.log(`Buffer size: ${buffer.length} bytes`);
     console.log('Hex head:', buffer.slice(0, 12).toString('hex'));
 
-    if (buffer.length < 100) {
-      throw new Error(`Buffer trop petit (${buffer.length} bytes) - Image probablement corrompue`);
+    // Garde-fou : si < 1KB, on considère la payload corrompue/tronquée
+    if (buffer.length < 1024) {
+      throw new Error(`Image corrompue ou tronquée (taille ${buffer.length} bytes)`);
     }
 
     const sniff = sniffImageType(buffer);
     console.log(`Detected type: ${sniff.type}`);
 
-    // Corrige l'extension du nom de fichier
-    let finalFilename = filename || `image_${Date.now()}`;
-    finalFilename = finalFilename.replace(/\.[^.]+$/, '') + (sniff.ext || '.bin');
-
+    let finalFilename = (filename || `image_${Date.now()}`).replace(/\.[^.]+$/, '') + sniff.ext;
     const filepath = path.join(imagesDir, finalFilename);
     fs.writeFileSync(filepath, buffer);
     console.log(`✓ Saved: ${finalFilename}`);
     console.log('-------------------\n');
 
-    return {
-      filepath,
-      buffer,
-      filename: finalFilename,
-      mimeType: sniff.type,
-      size: buffer.length
-    };
+    return { filepath, buffer, filename: finalFilename, mimeType: sniff.type, size: buffer.length };
   } catch (err) {
     console.error('✗ Decode error:', err.message);
     throw new Error(`Décodage échoué: ${err.message}`);
@@ -150,12 +138,11 @@ function decodeAndSaveImage(base64String, filename) {
 }
 
 /* ========================= ROUTES ========================= */
-
 // Santé
 app.get('/', (req, res) => {
   res.json({
     status: 'online',
-    version: '4.1 - Base64 normalized',
+    version: '4.2 - Base64 hardened',
     endpoints: {
       'POST /send-email-base64': 'Envoyer email avec image base64 (JSON recommandé)',
       'POST /send-email-with-image': 'Upload fichier (multipart)',
@@ -189,7 +176,7 @@ app.post('/test-decode', (req, res) => {
   }
 });
 
-// Envoi email (payload JSON avec Base64)
+// Envoi email (Base64 en JSON)
 app.post('/send-email-base64', async (req, res) => {
   try {
     const { to, subject, message, imageBase64, imageName } = req.body;
@@ -199,24 +186,19 @@ app.post('/send-email-base64', async (req, res) => {
     console.log(`Subject: ${subject}`);
 
     if (!to || !subject || !message) {
-      return res.status(400).json({
-        success: false,
-        error: 'Champs "to", "subject" et "message" requis'
-      });
+      return res.status(400).json({ success: false, error: 'Champs "to", "subject" et "message" requis' });
     }
-    if (!imageBase64) {
-      return res.status(400).json({ success: false, error: 'Champ "imageBase64" requis' });
-    }
+    if (!imageBase64) return res.status(400).json({ success: false, error: 'Champ "imageBase64" requis' });
 
     const baseFilename = imageName || `image_${Date.now()}.jpg`;
     const imageData = decodeAndSaveImage(imageBase64, baseFilename);
 
-    console.log(`Preparing email...`);
-    console.log(`  Attachment: ${imageData.filename} (${imageData.size} bytes)`);
+    // Garde-fou : ne pas envoyer une PJ trop petite
+    if (imageData.size < 1024) {
+      throw new Error('Pièce jointe trop petite : payload Base64 invalide (vérifier encodage côté client)');
+    }
 
-    const detectedMime = imageData.mimeType !== 'unknown'
-      ? imageData.mimeType
-      : 'application/octet-stream';
+    const detectedMime = imageData.mimeType !== 'unknown' ? imageData.mimeType : 'application/octet-stream';
 
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
@@ -224,11 +206,7 @@ app.post('/send-email-base64', async (req, res) => {
       subject,
       html: `
         <!DOCTYPE html>
-        <html>
-        <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        </head>
+        <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
         <body style="margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;background-color:#f5f5f5;">
           <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f5f5f5;padding:20px;">
             <tr><td align="center">
@@ -269,51 +247,39 @@ app.post('/send-email-base64', async (req, res) => {
                 <tr>
                   <td style="background-color:#fafafa;padding:25px 35px;border-top:1px solid #e0e0e0;" align="center">
                     <p style="margin:0;font-size:13px;color:#666;font-weight:600;">Administration STS</p>
-                    <p style="margin:5px 0 0 0;font-size:12px;color:#999;">
-                      ${new Date().toLocaleDateString('fr-FR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
-                    </p>
+                    <p style="margin:5px 0 0 0;font-size:12px;color:#999;">${
+                      new Date().toLocaleDateString('fr-FR', { weekday:'long', year:'numeric', month:'long', day:'numeric' })
+                    }</p>
                   </td>
                 </tr>
               </table>
             </td></tr>
           </table>
-        </body>
-        </html>
+        </body></html>
       `,
-      attachments: [
-        {
-          filename: imageData.filename,
-          content: imageData.buffer,
-          contentType: detectedMime
-        }
-      ]
+      attachments: [{
+        filename: imageData.filename,
+        content: imageData.buffer,
+        contentType: detectedMime
+      }]
     };
 
     console.log('Sending email...');
     const info = await transporter.sendMail(mailOptions);
-
-    console.log('✓ EMAIL SENT');
-    console.log(`  Message ID: ${info.messageId}`);
-    console.log('=====================================\n');
+    console.log('✓ EMAIL SENT', `Message ID: ${info.messageId}`);
 
     res.json({
       success: true,
       message: 'Email envoyé avec succès',
       data: {
         messageId: info.messageId,
-        image: {
-          filename: imageData.filename,
-          size: imageData.size,
-          type: detectedMime,
-          path: imageData.filepath
-        },
+        image: { filename: imageData.filename, size: imageData.size, type: detectedMime, path: imageData.filepath },
         recipient: to,
         timestamp: new Date().toISOString()
       }
     });
   } catch (error) {
     console.error('✗ ERROR:', error.message);
-    console.error('=====================================\n');
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -329,33 +295,18 @@ app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
     const imageBuffer = fs.readFileSync(req.file.path);
     const ext = path.extname(req.file.filename).toLowerCase();
     const mimeTypes = {
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.bmp': 'image/bmp',
-      '.webp': 'image/webp'
+      '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif', '.bmp': 'image/bmp', '.webp': 'image/webp'
     };
 
-    const mailOptions = {
+    const info = await transporter.sendMail({
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
-      to,
-      subject,
+      to, subject,
       html: `<p>${message}</p><p><strong>Image jointe : ${req.file.filename}</strong></p>`,
-      attachments: [{
-        filename: req.file.filename,
-        content: imageBuffer,
-        contentType: mimeTypes[ext] || 'application/octet-stream'
-      }]
-    };
-
-    const info = await transporter.sendMail(mailOptions);
-
-    res.json({
-      success: true,
-      messageId: info.messageId,
-      filename: req.file.filename
+      attachments: [{ filename: req.file.filename, content: imageBuffer, contentType: mimeTypes[ext] || 'application/octet-stream' }]
     });
+
+    res.json({ success: true, messageId: info.messageId, filename: req.file.filename });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -364,14 +315,13 @@ app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
 // Liste images
 app.get('/images', (req, res) => {
   try {
-    const files = fs.readdirSync(imagesDir);
-    const images = files.filter(f => /\.(jpg|jpeg|png|gif|bmp|webp)$/i.test(f));
+    const files = fs.readdirSync(imagesDir).filter(f => /\.(jpg|jpeg|png|gif|bmp|webp)$/i.test(f));
     res.json({
       success: true,
-      count: images.length,
-      images: images.map(img => {
-        const stats = fs.statSync(path.join(imagesDir, img));
-        return { name: img, size: stats.size, created: stats.birthtime };
+      count: files.length,
+      images: files.map(name => {
+        const s = fs.statSync(path.join(imagesDir, name));
+        return { name, size: s.size, created: s.birthtime };
       })
     });
   } catch (error) {
@@ -381,16 +331,14 @@ app.get('/images', (req, res) => {
 
 // Erreurs
 app.use((error, req, res, next) => {
-  if (error instanceof multer.MulterError) {
-    return res.status(400).json({ error: error.message });
-  }
+  if (error instanceof multer.MulterError) return res.status(400).json({ error: error.message });
   res.status(500).json({ error: error.message });
 });
 
 // Démarrer
 app.listen(PORT, () => {
   console.log('========================================');
-  console.log('🚀 Email API v4.1 - Base64 normalized');
+  console.log('🚀 Email API v4.2 - Base64 hardened');
   console.log(`📡 Port: ${PORT}`);
   console.log(`📧 SMTP: ${SMTP_HOST}:${SMTP_PORT}`);
   console.log(`📁 Images: ${imagesDir}`);
