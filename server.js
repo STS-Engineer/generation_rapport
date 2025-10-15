@@ -63,18 +63,35 @@ const transporter = nodemailer.createTransport({
 
 // Fonction pour décoder base64 et sauvegarder l'image
 function saveBase64Image(base64String, filename) {
-  // Nettoyer la chaîne base64 si elle contient le préfixe data:image
-  let base64Data = base64String;
-  if (base64String.includes('base64,')) {
-    base64Data = base64String.split('base64,')[1];
+  try {
+    // Nettoyer la chaîne base64 si elle contient le préfixe data:image
+    let base64Data = base64String;
+    if (base64String.includes('base64,')) {
+      base64Data = base64String.split('base64,')[1];
+    }
+    
+    // Nettoyer les espaces et retours à la ligne
+    base64Data = base64Data.replace(/\s/g, '');
+    
+    // Décoder et sauvegarder
+    const buffer = Buffer.from(base64Data, 'base64');
+    
+    console.log(`Taille du buffer décodé: ${buffer.length} octets`);
+    
+    if (buffer.length < 100) {
+      throw new Error(`Image trop petite (${buffer.length} octets) - probablement corrompue`);
+    }
+    
+    const filepath = path.join(imagesDir, filename);
+    fs.writeFileSync(filepath, buffer);
+    
+    console.log(`Image sauvegardée avec succès: ${filepath} (${buffer.length} octets)`);
+    
+    return filepath;
+  } catch (error) {
+    console.error('Erreur lors du décodage base64:', error);
+    throw error;
   }
-  
-  // Décoder et sauvegarder
-  const buffer = Buffer.from(base64Data, 'base64');
-  const filepath = path.join(imagesDir, filename);
-  fs.writeFileSync(filepath, buffer);
-  
-  return filepath;
 }
 
 // Route de test
@@ -218,9 +235,8 @@ app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
 
     console.log(`Image sauvegardée: ${imagePath}`);
 
-    // Lire l'image en buffer et encoder en base64
+    // Lire l'image en buffer
     const imageBuffer = fs.readFileSync(imagePath);
-    const base64Image = imageBuffer.toString('base64');
     
     // Déterminer le type MIME
     const ext = path.extname(imageName).toLowerCase();
@@ -232,26 +248,37 @@ app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
     };
     const mimeType = mimeTypes[ext] || 'image/png';
 
-    // Configuration de l'email avec image embedée en base64
+    // Configuration de l'email avec CID reference
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
       to: to,
       subject: subject,
       html: `
         <div style="font-family: Arial, sans-serif; padding: 20px;">
-          <h2>${subject}</h2>
-          <p>${message}</p>
+          <h2 style="color: #333;">${subject}</h2>
+          <p style="font-size: 14px; line-height: 1.6;">${message}</p>
           <br>
-          <p>Image jointe ci-dessous:</p>
-          <img src="data:${mimeType};base64,${base64Image}" style="max-width: 600px; height: auto; display: block; border: 1px solid #ddd; padding: 5px;">
+          <div style="margin: 20px 0;">
+            <p style="font-weight: bold; margin-bottom: 10px;">Image jointe ci-dessous:</p>
+            <img src="cid:uniqueImageCID@nodemailer" alt="Image" style="max-width: 100%; height: auto; display: block; border: 2px solid #ddd; border-radius: 4px; padding: 5px; background: #f9f9f9;">
+          </div>
+          <br>
+          <p style="font-size: 12px; color: #666;">Si l'image ne s'affiche pas, veuillez consulter la pièce jointe.</p>
         </div>
       `,
       attachments: [
         {
           filename: imageName,
-          content: base64Image,
-          encoding: 'base64',
-          contentType: mimeType
+          content: imageBuffer,
+          contentType: mimeType,
+          cid: 'uniqueImageCID@nodemailer',
+          contentDisposition: 'inline'
+        },
+        {
+          filename: imageName,
+          content: imageBuffer,
+          contentType: mimeType,
+          contentDisposition: 'attachment'
         }
       ]
     };
