@@ -61,6 +61,15 @@ const transporter = nodemailer.createTransport({
   }
 });
 
+// Vérifier la connexion SMTP au démarrage
+transporter.verify(function(error, success) {
+  if (error) {
+    console.log('✗ Erreur connexion SMTP:', error.message);
+  } else {
+    console.log('✓ Serveur SMTP prêt');
+  }
+});
+
 // Fonction pour décoder base64
 function saveBase64Image(base64String, filename) {
   try {
@@ -83,7 +92,7 @@ function saveBase64Image(base64String, filename) {
     // Décoder
     const buffer = Buffer.from(base64Data, 'base64');
     
-    console.log(`Taille du buffer: ${buffer.length} octets`);
+    console.log(`  → Taille buffer: ${buffer.length} octets`);
     
     if (buffer.length < 50) {
       throw new Error(`Image trop petite (${buffer.length} octets)`);
@@ -92,9 +101,9 @@ function saveBase64Image(base64String, filename) {
     const filepath = path.join(imagesDir, filename);
     fs.writeFileSync(filepath, buffer);
     
-    console.log(`✓ Image sauvegardée: ${filename}`);
+    console.log(`  → Fichier sauvegardé: ${filename}`);
     
-    return { filepath, buffer, base64Data };
+    return { filepath, buffer };
   } catch (error) {
     console.error('✗ Erreur décodage:', error.message);
     throw error;
@@ -105,18 +114,23 @@ function saveBase64Image(base64String, filename) {
 app.get('/', (req, res) => {
   res.json({
     message: 'API Email avec Image - Serveur actif',
+    version: '3.0',
     endpoints: {
-      sendEmailBase64: 'POST /send-email-base64',
-      sendEmailFile: 'POST /send-email-with-image',
-      listImages: 'GET /images'
+      sendEmailBase64: 'POST /send-email-base64 - Image en base64',
+      sendEmailFile: 'POST /send-email-with-image - Upload fichier',
+      listImages: 'GET /images - Liste des images'
     }
   });
 });
 
-// Route principale : BASE64 avec Data URI + Attachment
+// Route principale : BASE64 avec pièce jointe uniquement
 app.post('/send-email-base64', async (req, res) => {
   try {
     const { to, subject, message, imageBase64, imageName } = req.body;
+
+    console.log('========== NOUVELLE DEMANDE ==========');
+    console.log(`Destinataire: ${to}`);
+    console.log(`Sujet: ${subject}`);
 
     // Validation
     if (!to || !subject || !message) {
@@ -137,10 +151,12 @@ app.post('/send-email-base64', async (req, res) => {
     const timestamp = Date.now();
     const randomNum = Math.round(Math.random() * 1E9);
     const extension = imageName ? path.extname(imageName) : '.png';
-    const filename = `${timestamp}-${randomNum}${extension}`;
+    const filename = `image_${timestamp}${extension}`;
 
+    console.log('Traitement de l\'image...');
+    
     // Sauvegarder l'image
-    const { filepath, buffer, base64Data } = saveBase64Image(imageBase64, filename);
+    const { filepath, buffer } = saveBase64Image(imageBase64, filename);
     
     // Type MIME
     const ext = path.extname(filename).toLowerCase();
@@ -152,10 +168,9 @@ app.post('/send-email-base64', async (req, res) => {
     };
     const mimeType = mimeTypes[ext] || 'image/png';
     
-    // Créer Data URI pour l'image
-    const dataUri = `data:${mimeType};base64,${base64Data}`;
+    console.log(`  → Type MIME: ${mimeType}`);
     
-    // Configuration email avec Data URI + Attachment
+    // Configuration email simple avec pièce jointe
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
       to: to,
@@ -165,44 +180,49 @@ app.post('/send-email-base64', async (req, res) => {
         <html>
         <head>
           <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
         </head>
-        <body style="margin: 0; padding: 0; font-family: Arial, sans-serif;">
-          <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #f4f4f4; padding: 20px;">
+        <body style="margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #f5f5f5;">
+          <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color: #f5f5f5; padding: 20px;">
             <tr>
               <td align="center">
-                <table width="600" cellpadding="0" cellspacing="0" border="0" style="background-color: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                <table width="600" cellpadding="0" cellspacing="0" border="0" style="background-color: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
+                  
                   <!-- Header -->
                   <tr>
-                    <td style="background-color: #4CAF50; padding: 20px; text-align: center;">
-                      <h1 style="color: white; margin: 0; font-size: 24px;">${subject}</h1>
+                    <td style="background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%); padding: 30px 20px; text-align: center;">
+                      <h1 style="color: white; margin: 0; font-size: 28px; font-weight: 600;">${subject}</h1>
                     </td>
                   </tr>
                   
-                  <!-- Message -->
+                  <!-- Content -->
                   <tr>
-                    <td style="padding: 30px;">
-                      <p style="font-size: 14px; line-height: 1.6; color: #333; margin: 0 0 20px 0;">${message}</p>
-                    </td>
-                  </tr>
-                  
-                  <!-- Image avec Data URI -->
-                  <tr>
-                    <td style="padding: 0 30px 30px 30px;">
-                      <p style="font-weight: bold; margin-bottom: 15px; color: #333;">Image jointe :</p>
-                      <div style="text-align: center; background-color: #f9f9f9; padding: 15px; border-radius: 8px; border: 1px solid #ddd;">
-                        <img src="${dataUri}" alt="Image jointe" style="max-width: 100%; height: auto; display: block; margin: 0 auto; border-radius: 4px;" />
+                    <td style="padding: 40px 30px;">
+                      <p style="font-size: 15px; line-height: 1.8; color: #333; margin: 0 0 25px 0;">${message}</p>
+                      
+                      <div style="background-color: #f9f9f9; border-left: 4px solid #4CAF50; padding: 20px; margin: 25px 0; border-radius: 4px;">
+                        <p style="margin: 0; font-size: 14px; color: #555;">
+                          <strong style="color: #4CAF50;">📎 Image jointe</strong><br>
+                          <span style="font-size: 13px; color: #777;">L'image est disponible en pièce jointe de cet email.</span><br>
+                          <span style="font-size: 12px; color: #999; font-style: italic;">Nom du fichier : ${filename}</span>
+                        </p>
                       </div>
+                      
+                      <p style="font-size: 13px; color: #999; margin: 20px 0 0 0; line-height: 1.6;">
+                        💡 <em>Pour visualiser l'image, veuillez ouvrir la pièce jointe ci-dessus.</em>
+                      </p>
                     </td>
                   </tr>
                   
                   <!-- Footer -->
                   <tr>
-                    <td style="background-color: #f9f9f9; padding: 20px; text-align: center; border-top: 1px solid #eee;">
-                      <p style="font-size: 11px; color: #999; margin: 0;">Administration STS - ${new Date().toLocaleDateString('fr-FR')}</p>
-                      <p style="font-size: 10px; color: #bbb; margin: 5px 0 0 0;">Si l'image ne s'affiche pas, consultez la pièce jointe.</p>
+                    <td style="background-color: #f9f9f9; padding: 20px 30px; text-align: center; border-top: 1px solid #e0e0e0;">
+                      <p style="font-size: 12px; color: #999; margin: 0;">
+                        <strong style="color: #666;">Administration STS</strong><br>
+                        ${new Date().toLocaleDateString('fr-FR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                      </p>
                     </td>
                   </tr>
+                  
                 </table>
               </td>
             </tr>
@@ -219,12 +239,15 @@ app.post('/send-email-base64', async (req, res) => {
       ]
     };
 
+    console.log('Envoi de l\'email...');
+    
     // Envoyer
     const info = await transporter.sendMail(mailOptions);
 
-    console.log('✓ Email envoyé:', info.messageId);
-    console.log(`  → Destinataire: ${to}`);
+    console.log('✓ Email envoyé avec succès');
+    console.log(`  → Message ID: ${info.messageId}`);
     console.log(`  → Image: ${filename} (${buffer.length} octets)`);
+    console.log('======================================\n');
 
     res.json({
       success: true,
@@ -233,17 +256,18 @@ app.post('/send-email-base64', async (req, res) => {
         messageId: info.messageId,
         imageSaved: filename,
         imageSize: buffer.length,
-        imagePath: `/images/${filename}`,
+        imagePath: filepath,
         recipient: to,
         timestamp: new Date().toISOString()
       }
     });
 
   } catch (error) {
-    console.error('✗ Erreur:', error.message);
+    console.error('✗ ERREUR:', error.message);
+    console.error('======================================\n');
     res.status(500).json({
       success: false,
-      error: 'Erreur lors de l\'envoi',
+      error: 'Erreur lors de l\'envoi de l\'email',
       details: error.message
     });
   }
@@ -280,10 +304,6 @@ app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
       '.gif': 'image/gif'
     };
     const mimeType = mimeTypes[ext] || 'image/png';
-    
-    // Convertir en base64 pour Data URI
-    const base64Data = imageBuffer.toString('base64');
-    const dataUri = `data:${mimeType};base64,${base64Data}`;
 
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
@@ -292,11 +312,14 @@ app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
       html: `
         <!DOCTYPE html>
         <html>
-        <body style="font-family: Arial, sans-serif; padding: 20px;">
-          <h2 style="color: #333;">${subject}</h2>
-          <p style="font-size: 14px; line-height: 1.6;">${message}</p>
-          <div style="margin: 30px 0; text-align: center;">
-            <img src="${dataUri}" alt="Image" style="max-width: 100%; height: auto; border-radius: 8px;">
+        <body style="font-family: Arial, sans-serif; padding: 20px; background-color: #f5f5f5;">
+          <div style="max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px;">
+            <h2 style="color: #333; border-bottom: 3px solid #4CAF50; padding-bottom: 10px;">${subject}</h2>
+            <p style="font-size: 14px; line-height: 1.8; color: #555;">${message}</p>
+            <div style="margin: 20px 0; padding: 15px; background-color: #f0f0f0; border-radius: 4px;">
+              <strong>📎 Image jointe : ${imageName}</strong>
+            </div>
+            <p style="font-size: 12px; color: #999;">Administration STS - ${new Date().toLocaleDateString('fr-FR')}</p>
           </div>
         </body>
         </html>
@@ -317,7 +340,8 @@ app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
       message: 'Email envoyé',
       data: {
         messageId: info.messageId,
-        imageSaved: imageName
+        imageSaved: imageName,
+        imageSize: imageBuffer.length
       }
     });
 
@@ -339,14 +363,49 @@ app.get('/images', (req, res) => {
       return ['.jpg', '.jpeg', '.png', '.gif'].includes(ext);
     });
 
+    const imageDetails = images.map(img => {
+      const stats = fs.statSync(path.join(imagesDir, img));
+      return {
+        name: img,
+        size: stats.size,
+        created: stats.birthtime,
+        modified: stats.mtime
+      };
+    });
+
     res.json({
       success: true,
       count: images.length,
-      images: images.map(img => ({
-        name: img,
-        size: fs.statSync(path.join(imagesDir, img)).size,
-        created: fs.statSync(path.join(imagesDir, img)).birthtime
-      }))
+      totalSize: imageDetails.reduce((sum, img) => sum + img.size, 0),
+      images: imageDetails
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Supprimer une image
+app.delete('/images/:filename', (req, res) => {
+  try {
+    const filename = req.params.filename;
+    const filepath = path.join(imagesDir, filename);
+    
+    if (!fs.existsSync(filepath)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Image non trouvée'
+      });
+    }
+    
+    fs.unlinkSync(filepath);
+    
+    res.json({
+      success: true,
+      message: 'Image supprimée',
+      filename: filename
     });
   } catch (error) {
     res.status(500).json({
@@ -374,9 +433,10 @@ app.use((error, req, res, next) => {
 
 // Démarrer
 app.listen(PORT, () => {
-  console.log(`========================================`);
-  console.log(`🚀 Serveur sur le port ${PORT}`);
+  console.log('========================================');
+  console.log('🚀 Serveur Email API v3.0');
+  console.log(`📡 Port: ${PORT}`);
   console.log(`📧 SMTP: ${SMTP_HOST}:${SMTP_PORT}`);
-  console.log(`📁 Images: ${imagesDir}`);
-  console.log(`========================================`);
+  console.log(`📁 Dossier images: ${imagesDir}`);
+  console.log('========================================\n');
 });
