@@ -21,10 +21,10 @@ if (!fs.existsSync(imagesDir)) {
 }
 
 // Middleware
-app.use(express.json({ limit: '10mb' })); // Augmenter la limite pour base64
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Configuration Multer pour sauvegarder les fichiers dans le dossier images
+// Configuration Multer
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, imagesDir);
@@ -37,7 +37,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // Limite de 10MB
+  limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|gif/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
@@ -61,19 +61,27 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// Fonction pour décoder base64 et sauvegarder l'image
+// Fonction améliorée pour décoder base64
 function saveBase64Image(base64String, filename) {
   try {
-    // Nettoyer la chaîne base64 si elle contient le préfixe data:image
     let base64Data = base64String;
+    
+    // Nettoyer le préfixe data:image
     if (base64String.includes('base64,')) {
       base64Data = base64String.split('base64,')[1];
+    } else if (base64String.includes(',')) {
+      base64Data = base64String.split(',')[1];
     }
     
-    // Nettoyer les espaces et retours à la ligne
-    base64Data = base64Data.replace(/\s/g, '');
+    // Nettoyer les espaces et caractères non-base64
+    base64Data = base64Data.replace(/[^A-Za-z0-9+/=]/g, '');
     
-    // Décoder et sauvegarder
+    // Vérifier que la chaîne base64 est valide
+    if (base64Data.length === 0) {
+      throw new Error('Chaîne base64 vide après nettoyage');
+    }
+    
+    // Décoder
     const buffer = Buffer.from(base64Data, 'base64');
     
     console.log(`Taille du buffer décodé: ${buffer.length} octets`);
@@ -85,11 +93,11 @@ function saveBase64Image(base64String, filename) {
     const filepath = path.join(imagesDir, filename);
     fs.writeFileSync(filepath, buffer);
     
-    console.log(`Image sauvegardée avec succès: ${filepath} (${buffer.length} octets)`);
+    console.log(`Image sauvegardée: ${filepath} (${buffer.length} octets)`);
     
     return filepath;
   } catch (error) {
-    console.error('Erreur lors du décodage base64:', error);
+    console.error('Erreur décodage base64:', error.message);
     throw error;
   }
 }
@@ -99,18 +107,19 @@ app.get('/', (req, res) => {
   res.json({
     message: 'API Email avec Image - Serveur actif',
     endpoints: {
-      sendEmailBase64: 'POST /send-email-base64 (pour GPT Assistant)',
-      sendEmailFile: 'POST /send-email-with-image (upload fichier)'
+      sendEmailBase64: 'POST /send-email-base64',
+      sendEmailFile: 'POST /send-email-with-image',
+      listImages: 'GET /images'
     }
   });
 });
 
-// Route pour envoyer un email avec image en BASE64 (pour GPT Assistant)
+// Route principale : Envoyer email avec image BASE64
 app.post('/send-email-base64', async (req, res) => {
   try {
     const { to, subject, message, imageBase64, imageName } = req.body;
 
-    // Validation des champs requis
+    // Validation
     if (!to || !subject || !message) {
       return res.status(400).json({
         success: false,
@@ -125,20 +134,20 @@ app.post('/send-email-base64', async (req, res) => {
       });
     }
 
-    // Générer un nom de fichier unique
+    // Générer nom unique
     const timestamp = Date.now();
     const randomNum = Math.round(Math.random() * 1E9);
     const extension = imageName ? path.extname(imageName) : '.png';
     const filename = `${timestamp}-${randomNum}${extension}`;
 
-    // Sauvegarder l'image décodée
+    // Sauvegarder l'image
     const imagePath = saveBase64Image(imageBase64, filename);
-    console.log(`Image base64 décodée et sauvegardée: ${imagePath}`);
+    console.log(`✓ Image sauvegardée: ${imagePath}`);
 
-    // Lire l'image en buffer
+    // Lire l'image
     const imageBuffer = fs.readFileSync(imagePath);
     
-    // Déterminer le type MIME
+    // Type MIME
     const ext = path.extname(filename).toLowerCase();
     const mimeTypes = {
       '.png': 'image/png',
@@ -148,22 +157,24 @@ app.post('/send-email-base64', async (req, res) => {
     };
     const mimeType = mimeTypes[ext] || 'image/png';
     
-    // Configuration de l'email avec CID reference
+    // CID unique pour cette image
+    const cid = `image_${timestamp}@nodemailer`;
+    
+    // Configuration email SIMPLIFIÉE
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
       to: to,
       subject: subject,
       html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px;">
-          <h2 style="color: #333;">${subject}</h2>
-          <p style="font-size: 14px; line-height: 1.6;">${message}</p>
-          <br>
-          <div style="margin: 20px 0;">
-            <p style="font-weight: bold; margin-bottom: 10px;">Image jointe ci-dessous:</p>
-            <img src="cid:uniqueImageCID@nodemailer" alt="Image" style="max-width: 100%; height: auto; display: block; border: 2px solid #ddd; border-radius: 4px; padding: 5px; background: #f9f9f9;">
+        <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 600px;">
+          <h2 style="color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px;">${subject}</h2>
+          <p style="font-size: 14px; line-height: 1.6; color: #555;">${message}</p>
+          <div style="margin: 30px 0; text-align: center;">
+            <p style="font-weight: bold; margin-bottom: 15px; color: #333;">Image jointe :</p>
+            <img src="cid:${cid}" alt="Image jointe" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
           </div>
-          <br>
-          <p style="font-size: 12px; color: #666;">Si l'image ne s'affiche pas, veuillez consulter la pièce jointe.</p>
+          <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+          <p style="font-size: 11px; color: #999; text-align: center;">Administration STS - ${new Date().toLocaleDateString('fr-FR')}</p>
         </div>
       `,
       attachments: [
@@ -171,22 +182,15 @@ app.post('/send-email-base64', async (req, res) => {
           filename: filename,
           content: imageBuffer,
           contentType: mimeType,
-          cid: 'uniqueImageCID@nodemailer',
-          contentDisposition: 'inline'
-        },
-        {
-          filename: filename,
-          content: imageBuffer,
-          contentType: mimeType,
-          contentDisposition: 'attachment'
+          cid: cid
         }
       ]
     };
 
-    // Envoyer l'email
+    // Envoyer
     const info = await transporter.sendMail(mailOptions);
 
-    console.log('Email envoyé avec succès:', info.messageId);
+    console.log('✓ Email envoyé:', info.messageId);
 
     res.json({
       success: true,
@@ -194,51 +198,45 @@ app.post('/send-email-base64', async (req, res) => {
       data: {
         messageId: info.messageId,
         imageSaved: filename,
-        imagePath: `/images/${filename}`,
-        recipient: to
+        imageSize: imageBuffer.length,
+        recipient: to,
+        timestamp: new Date().toISOString()
       }
     });
 
   } catch (error) {
-    console.error('Erreur lors de l\'envoi de l\'email:', error);
+    console.error('✗ Erreur:', error.message);
     res.status(500).json({
       success: false,
-      error: 'Erreur lors de l\'envoi de l\'email',
+      error: 'Erreur lors de l\'envoi',
       details: error.message
     });
   }
 });
 
-// Route pour envoyer un email avec image (upload fichier classique)
+// Route alternative : Upload fichier
 app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
   try {
     const { to, subject, message } = req.body;
 
-    // Validation des champs requis
     if (!to || !subject || !message) {
       return res.status(400).json({
         success: false,
-        error: 'Les champs "to", "subject" et "message" sont requis'
+        error: 'Champs requis manquants'
       });
     }
 
     if (!req.file) {
       return res.status(400).json({
         success: false,
-        error: 'Aucune image n\'a été uploadée'
+        error: 'Aucune image uploadée'
       });
     }
 
-    // Chemin complet de l'image sauvegardée
     const imagePath = req.file.path;
     const imageName = req.file.filename;
-
-    console.log(`Image sauvegardée: ${imagePath}`);
-
-    // Lire l'image en buffer
     const imageBuffer = fs.readFileSync(imagePath);
     
-    // Déterminer le type MIME
     const ext = path.extname(imageName).toLowerCase();
     const mimeTypes = {
       '.png': 'image/png',
@@ -247,23 +245,19 @@ app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
       '.gif': 'image/gif'
     };
     const mimeType = mimeTypes[ext] || 'image/png';
+    const cid = `image_${Date.now()}@nodemailer`;
 
-    // Configuration de l'email avec CID reference
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
       to: to,
       subject: subject,
       html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px;">
+        <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 600px;">
           <h2 style="color: #333;">${subject}</h2>
           <p style="font-size: 14px; line-height: 1.6;">${message}</p>
-          <br>
-          <div style="margin: 20px 0;">
-            <p style="font-weight: bold; margin-bottom: 10px;">Image jointe ci-dessous:</p>
-            <img src="cid:uniqueImageCID@nodemailer" alt="Image" style="max-width: 100%; height: auto; display: block; border: 2px solid #ddd; border-radius: 4px; padding: 5px; background: #f9f9f9;">
+          <div style="margin: 30px 0; text-align: center;">
+            <img src="cid:${cid}" alt="Image" style="max-width: 100%; height: auto; border-radius: 8px;">
           </div>
-          <br>
-          <p style="font-size: 12px; color: #666;">Si l'image ne s'affiche pas, veuillez consulter la pièce jointe.</p>
         </div>
       `,
       attachments: [
@@ -271,45 +265,32 @@ app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
           filename: imageName,
           content: imageBuffer,
           contentType: mimeType,
-          cid: 'uniqueImageCID@nodemailer',
-          contentDisposition: 'inline'
-        },
-        {
-          filename: imageName,
-          content: imageBuffer,
-          contentType: mimeType,
-          contentDisposition: 'attachment'
+          cid: cid
         }
       ]
     };
 
-    // Envoyer l'email
     const info = await transporter.sendMail(mailOptions);
-
-    console.log('Email envoyé avec succès:', info.messageId);
 
     res.json({
       success: true,
-      message: 'Email envoyé avec succès',
+      message: 'Email envoyé',
       data: {
         messageId: info.messageId,
-        imageSaved: imageName,
-        imagePath: `/images/${imageName}`,
-        recipient: to
+        imageSaved: imageName
       }
     });
 
   } catch (error) {
-    console.error('Erreur lors de l\'envoi de l\'email:', error);
+    console.error('Erreur:', error.message);
     res.status(500).json({
       success: false,
-      error: 'Erreur lors de l\'envoi de l\'email',
-      details: error.message
+      error: error.message
     });
   }
 });
 
-// Route pour lister les images dans le dossier
+// Lister les images
 app.get('/images', (req, res) => {
   try {
     const files = fs.readdirSync(imagesDir);
@@ -321,24 +302,27 @@ app.get('/images', (req, res) => {
     res.json({
       success: true,
       count: images.length,
-      images: images
+      images: images.map(img => ({
+        name: img,
+        size: fs.statSync(path.join(imagesDir, img)).size,
+        path: `/images/${img}`
+      }))
     });
   } catch (error) {
     res.status(500).json({
       success: false,
-      error: 'Erreur lors de la lecture du dossier images',
-      details: error.message
+      error: error.message
     });
   }
 });
 
-// Gestion des erreurs globales
+// Gestion erreurs
 app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
     if (error.code === 'LIMIT_FILE_SIZE') {
       return res.status(400).json({
         success: false,
-        error: 'Le fichier est trop volumineux (max 10MB)'
+        error: 'Fichier trop volumineux (max 10MB)'
       });
     }
   }
@@ -348,11 +332,11 @@ app.use((error, req, res, next) => {
   });
 });
 
-// Démarrer le serveur
+// Démarrer
 app.listen(PORT, () => {
   console.log(`========================================`);
-  console.log(`🚀 Serveur démarré sur le port ${PORT}`);
+  console.log(`🚀 Serveur sur le port ${PORT}`);
   console.log(`📧 SMTP: ${SMTP_HOST}:${SMTP_PORT}`);
-  console.log(`📁 Dossier images: ${imagesDir}`);
+  console.log(`📁 Images: ${imagesDir}`);
   console.log(`========================================`);
 });
