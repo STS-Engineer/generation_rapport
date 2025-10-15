@@ -118,10 +118,21 @@ app.post('/send-email-base64', async (req, res) => {
     const imagePath = saveBase64Image(imageBase64, filename);
     console.log(`Image base64 décodée et sauvegardée: ${imagePath}`);
 
-    // Lire l'image en buffer
+    // Lire l'image en buffer et encoder en base64
     const imageBuffer = fs.readFileSync(imagePath);
+    const base64Image = imageBuffer.toString('base64');
     
-    // Configuration de l'email
+    // Déterminer le type MIME
+    const ext = path.extname(filename).toLowerCase();
+    const mimeTypes = {
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif'
+    };
+    const mimeType = mimeTypes[ext] || 'image/png';
+    
+    // Configuration de l'email avec image embedée en base64
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
       to: to,
@@ -132,15 +143,15 @@ app.post('/send-email-base64', async (req, res) => {
           <p>${message}</p>
           <br>
           <p>Image jointe ci-dessous:</p>
-          <img src="cid:attached-image" style="max-width: 600px; height: auto; display: block;">
+          <img src="data:${mimeType};base64,${base64Image}" style="max-width: 600px; height: auto; display: block; border: 1px solid #ddd; padding: 5px;">
         </div>
       `,
       attachments: [
         {
           filename: filename,
-          content: imageBuffer,
-          cid: 'attached-image',
-          contentDisposition: 'inline'
+          content: base64Image,
+          encoding: 'base64',
+          contentType: mimeType
         }
       ]
     };
@@ -197,6 +208,9 @@ app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
 
     console.log(`Image sauvegardée: ${imagePath}`);
 
+    // Lire l'image en buffer
+    const imageBuffer = fs.readFileSync(imagePath);
+
     // Configuration de l'email
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
@@ -208,14 +222,15 @@ app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
           <p>${message}</p>
           <br>
           <p>Image jointe ci-dessous:</p>
-          <img src="cid:attached-image" style="max-width: 600px; height: auto;">
+          <img src="cid:attached-image" style="max-width: 600px; height: auto; display: block;">
         </div>
       `,
       attachments: [
         {
           filename: imageName,
-          path: imagePath,
-          cid: 'attached-image'
+          content: imageBuffer,
+          cid: 'attached-image',
+          contentDisposition: 'inline'
         }
       ]
     };
