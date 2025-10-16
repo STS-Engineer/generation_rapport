@@ -5,12 +5,12 @@
  *  - GET  /health
  *  - POST /send-email-base64
  *
- * SMTP recommandé (Office 365):
+ * SMTP recommandé (Office 365) :
  *  SMTP_HOST=smtp.office365.com
  *  SMTP_PORT=587
  *  SMTP_SECURE=false
  *  SMTP_USER=compte@domaine
- *  SMTP_PASS=motdepasse (ou mot de passe d’application si MFA)
+ *  SMTP_PASS=motdepasse (ou mot de passe d'app si MFA)
  */
 
 const express = require("express");
@@ -21,27 +21,28 @@ const path = require("path");
 const PORT = process.env.PORT || 3000;
 
 // SMTP (Nodemailer)
-const SMTP_HOST = process.env.SMTP_HOST || "smtp.office365.com";
-const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_HOST   = process.env.SMTP_HOST   || "smtp.office365.com";
+const SMTP_PORT   = Number(process.env.SMTP_PORT || 587);
 const SMTP_SECURE = String(process.env.SMTP_SECURE || "false") === "true"; // false sur 587 (STARTTLS)
-const SMTP_USER = process.env.SMTP_USER || "";
-const SMTP_PASS = process.env.SMTP_PASS || "";
+const SMTP_USER   = process.env.SMTP_USER   || "";
+const SMTP_PASS   = process.env.SMTP_PASS   || "";
 
 // Expéditeur
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "Administration STS";
-const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
+const EMAIL_FROM      = process.env.EMAIL_FROM      || "administration.STS@avocarbon.com";
 
 // Limites & formats
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10MB (après décodage)
-const ALLOWED_EXT = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
+const ALLOWED_EXT     = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
 
 // =================== APP ===================
 const app = express();
-// 12MB pour compenser l’overhead du base64 dans le JSON
-app.use(express.json({ limit: "12mb" }));
+// JSON un peu généreux pour absorber l'overhead Base64 (~33%)
+app.use(express.json({ limit: "20mb" }));
 
 // =================== UTILS ===================
-const validateEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
+const validateEmail = (email) =>
+  /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
 
 const escapeHtml = (str) =>
   String(str || "")
@@ -49,38 +50,40 @@ const escapeHtml = (str) =>
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
+const stripDataUrlPrefix = (b64) => {
+  const s = String(b64 || "");
+  const i = s.indexOf("base64,");
+  return i >= 0 ? s.slice(i + "base64,".length) : s;
+};
+
 const detectMimeFromMagicBytes = (buf) => {
   if (!buf || buf.length < 12) return { mime: "application/octet-stream", ok: false };
 
   // PNG
-  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) {
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47)
     return { mime: "image/png", ok: true };
-  }
   // JPEG
-  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) {
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF)
     return { mime: "image/jpeg", ok: true };
-  }
   // GIF
-  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) {
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46)
     return { mime: "image/gif", ok: true };
-  }
   // WebP: "RIFF....WEBP"
   if (
     buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46 &&
     buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50
-  ) {
-    return { mime: "image/webp", ok: true };
-  }
+  ) return { mime: "image/webp", ok: true };
+
   return { mime: "application/octet-stream", ok: false };
 };
 
 const extFromMime = (mime) => {
   switch (mime) {
-    case "image/png": return ".png";
+    case "image/png":  return ".png";
     case "image/jpeg": return ".jpg";
-    case "image/gif": return ".gif";
+    case "image/gif":  return ".gif";
     case "image/webp": return ".webp";
-    default: return "";
+    default:           return "";
   }
 };
 
@@ -92,25 +95,19 @@ const sanitizeFileName = (name, fallbackExt) => {
   return base;
 };
 
-const stripDataUrlPrefix = (b64) => {
-  const s = String(b64 || "");
-  const idx = s.indexOf("base64,");
-  return idx >= 0 ? s.slice(idx + "base64,".length) : s;
-};
-
 // =================== SMTP ===================
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
-  secure: SMTP_SECURE,
+  secure: SMTP_SECURE, // false pour 587 (STARTTLS)
   auth: SMTP_USER && SMTP_PASS ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
-  tls: { rejectUnauthorized: false },
+  tls: { rejectUnauthorized: false }, // utile si certifs internes
 });
 
 // =================== ROUTES ===================
 
 // Health
-app.get("/health", async (req, res) => {
+app.get("/health", (req, res) => {
   res.json({
     success: true,
     smtpHost: SMTP_HOST,
@@ -121,12 +118,12 @@ app.get("/health", async (req, res) => {
   });
 });
 
-// Envoi d'email depuis un base64
+// Envoi d'email depuis Base64
 app.post("/send-email-base64", async (req, res) => {
   try {
     const { to, subject, message, imageBase64, imageName } = req.body || {};
 
-    // Validations
+    // 1) Validations
     if (!to || !subject || !imageBase64) {
       return res.status(400).json({
         success: false,
@@ -137,7 +134,7 @@ app.post("/send-email-base64", async (req, res) => {
       return res.status(400).json({ success: false, error: "Format d'email invalide pour 'to'." });
     }
 
-    // Décodage base64 (Data URL accepté)
+    // 2) Décodage Base64 (Data URL accepté)
     const raw = stripDataUrlPrefix(imageBase64);
     let buffer;
     try {
@@ -153,40 +150,41 @@ app.post("/send-email-base64", async (req, res) => {
       return res.status(400).json({ success: false, error: `Image trop volumineuse (>${MAX_IMAGE_BYTES} octets).` });
     }
 
-    // Type & nom de fichier
+    // 3) Détection du type + nom de fichier
     const { mime, ok } = detectMimeFromMagicBytes(buffer);
     if (!ok) {
       return res.status(400).json({ success: false, error: "Type d'image non reconnu ou non autorisé." });
     }
-    const ext = extFromMime(mime);
-    const safeName = sanitizeFileName(imageName, ext);
-    const outExt = path.extname(safeName).toLowerCase();
+    const ext      = extFromMime(mime);
+    const fileName = sanitizeFileName(imageName, ext);
+    const outExt   = path.extname(fileName).toLowerCase();
     if (!ALLOWED_EXT.includes(outExt)) {
       return res.status(400).json({ success: false, error: "Extension d'image non autorisée (PNG/JPG/JPEG/GIF/WebP)." });
     }
 
-    // Corps HTML (préserve \n)
+    // 4) Corps HTML (préserve \n)
     const html = `
       <div style="font-family: Arial, sans-serif; padding: 16px;">
         <h2 style="color:#333;">${escapeHtml(subject)}</h2>
         <p style="white-space: pre-line; font-size:14px; line-height:1.6;">${escapeHtml(message || "")}</p>
         <div style="margin-top:16px;">
           <p style="font-weight:bold; margin:8px 0;">Image inline :</p>
-          <img src="cid:imgcid@inline" alt="Image" style="max-width:100%; height:auto; display:block; border:1px solid #ddd; border-radius:6px; padding:4px; background:#fafafa;">
+          <img src="cid:imgcid@inline" alt="Image"
+               style="max-width:100%; height:auto; display:block; border:1px solid #ddd; border-radius:6px; padding:4px; background:#fafafa;">
         </div>
         <p style="color:#777; font-size:12px; margin-top:12px;">Si l'image ne s'affiche pas, vérifiez la pièce jointe.</p>
       </div>
     `;
 
-    // Envoi
+    // 5) Envoi email
     const info = await transporter.sendMail({
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
       to,
       subject,
       html,
       attachments: [
-        { filename: safeName, content: buffer, contentType: mime, cid: "imgcid@inline", contentDisposition: "inline" },
-        { filename: safeName, content: buffer, contentType: mime, contentDisposition: "attachment" },
+        { filename: fileName, content: buffer, contentType: mime, cid: "imgcid@inline", contentDisposition: "inline" },
+        { filename: fileName, content: buffer, contentType: mime, contentDisposition: "attachment" },
       ],
     });
 
@@ -197,7 +195,7 @@ app.post("/send-email-base64", async (req, res) => {
         messageId: info.messageId,
         recipient: to,
         imageSize: buffer.length,
-        imageName: safeName,
+        imageName: fileName,
         timestamp: new Date().toISOString(),
       },
     });
