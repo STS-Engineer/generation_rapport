@@ -1,419 +1,431 @@
-const express = require('express');
-const nodemailer = require('nodemailer');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+/**
+ * server.js — API Email + Images (GitHub-backed, Azure domain-safe)
+ * -----------------------------------------
+ * Endpoints:
+ *  - POST   /upload-image              (multipart, upload -> GitHub, renvoie publicUrl = {PUBLIC_SERVER_URL}/images/{filename})
+ *  - POST   /send-email-with-image     (JSON, envoie email avec imageUrl inline + attachment) [même domaine obligatoire]
+ *  - POST   /upload-and-send-email     (multipart, fait upload + send en 1 étape)
+ *  - GET    /list-images               (liste les fichiers image du dossier GitHub configuré)
+ *  - GET    /images/:filename          (proxy lecture RAW GitHub -> même domaine)
+ *  - GET    /health                    (diagnostic rapide)
+ */
 
-const app = express();
+const express = require("express");
+const nodemailer = require("nodemailer");
+const multer = require("multer");
+const path = require("path");
+const crypto = require("crypto");
+const axios = require("axios");
+
+// =================== CONFIG (via ENV) ===================
 const PORT = process.env.PORT || 3000;
 
-/* ========================= CONFIG FIXE ========================= */
-const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
-const SMTP_PORT = 25;
-const EMAIL_FROM_NAME = "Administration STS";
-const EMAIL_FROM = "administration.STS@avocarbon.com";
+// Domaine public de ce serveur (utilisé pour fabriquer des URLs sûres)
+const PUBLIC_SERVER_URL = process.env.PUBLIC_SERVER_URL || "https://pdf-api.azurewebsites.net";
 
-// Créer le dossier images s'il n'existe pas
-const imagesDir = path.join(__dirname, 'images');
-if (!fs.existsSync(imagesDir)) {
-  fs.mkdirSync(imagesDir, { recursive: true });
-  console.log('Dossier images créé');
+// GitHub (upload des images)
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;              // token PAT avec scope "repo"
+const GITHUB_OWNER = process.env.GITHUB_OWNER;              // ex: "avocarbon-group"
+const GITHUB_REPO  = process.env.GITHUB_REPO;               // ex: "assets-email"
+const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";  // ex: "main"
+const GITHUB_IMAGES_DIR = process.env.GITHUB_IMAGES_DIR || "images"; // dossier dans le repo
+const GITHUB_COMMITTER_NAME = process.env.GITHUB_COMMITTER_NAME || "Azure Bot";
+const GITHUB_COMMITTER_EMAIL = process.env.GITHUB_COMMITTER_EMAIL || "azure-bot@avocarbon.com";
+
+// SMTP (Nodemailer)
+const SMTP_HOST = process.env.SMTP_HOST || "avocarbon-com.mail.protection.outlook.com";
+const SMTP_PORT = Number(process.env.SMTP_PORT || 25);
+const SMTP_SECURE = false; // sur 25, généralement false (STARTTLS auto)
+const SMTP_USER = process.env.SMTP_USER || ""; // si auth requise
+const SMTP_PASS = process.env.SMTP_PASS || ""; // si auth requise
+const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "Administration STS";
+const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
+
+// Limites & formats acceptés
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
+const ALLOWED_EXT = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
+const ALLOWED_MIME = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+// =================== APP / MIDDLEWARE ===================
+const app = express();
+app.use(express.json({ limit: "5mb" }));
+app.use(express.urlencoded({ extended: true, limit: "5mb" }));
+
+// Multer (mémoire, pas de disque local)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_SIZE_BYTES },
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    if (!ALLOWED_EXT.includes(ext) || !ALLOWED_MIME.includes(file.mimetype)) {
+      return cb(new Error("Formats autorisés: PNG/JPG/JPEG/GIF/WebP (max 50MB)"));
+    }
+    cb(null, true);
+  },
+});
+
+// =================== UTILS ===================
+const isSameDomain = (urlStr) => {
+  try {
+    const u = new URL(urlStr);
+    const p = new URL(PUBLIC_SERVER_URL);
+    return u.host === p.host && u.protocol === p.protocol;
+  } catch {
+    return false;
+  }
+};
+
+const validateEmail = (email) => {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
+};
+
+const escapeHtml = (str) =>
+  String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+const guessMime = (filename) => {
+  const ext = path.extname(filename).toLowerCase();
+  switch (ext) {
+    case ".png": return "image/png";
+    case ".jpg":
+    case ".jpeg": return "image/jpeg";
+    case ".gif": return "image/gif";
+    case ".webp": return "image/webp";
+    default: return "application/octet-stream";
+  }
+};
+
+// Chemin GitHub (raw) pour une image
+const rawGithubUrl = (filename) =>
+  `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/${GITHUB_BRANCH}/${GITHUB_IMAGES_DIR}/${encodeURIComponent(filename)}`;
+
+// Proxy interne (même domaine) vers l’image GitHub
+app.get("/images/:filename", async (req, res) => {
+  try {
+    const filename = req.params.filename;
+    const url = rawGithubUrl(filename);
+    const resp = await axios.get(url, { responseType: "arraybuffer" });
+    res.setHeader("Content-Type", guessMime(filename));
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.send(Buffer.from(resp.data));
+  } catch (err) {
+    res.status(404).json({ success: false, error: "Image introuvable" });
+  }
+});
+
+// =================== GITHUB API HELPERS ===================
+const gh = axios.create({
+  baseURL: "https://api.github.com",
+  headers: {
+    Authorization: `Bearer ${GITHUB_TOKEN}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "azure-email-image-api",
+  },
+});
+
+// Upload (create) content in repo
+async function uploadToGitHub(filename, buffer) {
+  const ext = path.extname(filename).toLowerCase();
+  if (!ALLOWED_EXT.includes(ext)) {
+    throw new Error("Extension non autorisée");
+  }
+
+  const relPath = `${GITHUB_IMAGES_DIR}/${filename}`;
+  const contentB64 = buffer.toString("base64");
+
+  const { data } = await gh.put(
+    `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodeURI(relPath)}`,
+    {
+      message: `Upload ${filename}`,
+      content: contentB64,
+      branch: GITHUB_BRANCH,
+      committer: {
+        name: GITHUB_COMMITTER_NAME,
+        email: GITHUB_COMMITTER_EMAIL,
+      },
+    }
+  );
+
+  return {
+    path: relPath,
+    sha: data.content && data.content.sha,
+    publicUrl: `${PUBLIC_SERVER_URL}/images/${encodeURIComponent(filename)}`, // domaine sûr !
+    size: buffer.length,
+  };
 }
 
-// Middleware
-app.use(express.json({ limit: '10mb' })); // Augmenter la limite pour base64
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// List directory contents
+async function listGitHubImages() {
+  const { data } = await gh.get(
+    `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${encodeURI(GITHUB_IMAGES_DIR)}?ref=${encodeURIComponent(GITHUB_BRANCH)}`
+  );
+  const files = Array.isArray(data) ? data : [];
+  return files
+    .filter((f) => f.type === "file")
+    .filter((f) => ALLOWED_EXT.includes(path.extname(f.name).toLowerCase()))
+    .map((f) => ({
+      name: f.name,
+      size: f.size,
+      path: f.path,
+      url: `${PUBLIC_SERVER_URL}/images/${encodeURIComponent(f.name)}`,
+    }));
+}
 
-// Configuration Multer pour sauvegarder les fichiers dans le dossier images
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, imagesDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
-  }
-});
-
-const upload = multer({
-  storage: storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // Limite de 10MB
-  fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|gif/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
-    
-    if (mimetype && extname) {
-      return cb(null, true);
-    } else {
-      cb(new Error('Seules les images sont autorisées (jpeg, jpg, png, gif)'));
-    }
-  }
-});
-
-// Configuration du transporteur SMTP
+// =================== SMTP (Nodemailer) ===================
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
-  secure: false,
-  tls: {
-    rejectUnauthorized: false
-  }
+  secure: SMTP_SECURE,
+  auth: SMTP_USER && SMTP_PASS ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
+  tls: { rejectUnauthorized: false },
 });
 
-// Fonction pour décoder base64 et sauvegarder l'image
-function saveBase64Image(base64String, filename) {
-  try {
-    // Nettoyer la chaîne base64 si elle contient le préfixe data:image
-    let base64Data = base64String;
-    if (base64String.includes('base64,')) {
-      base64Data = base64String.split('base64,')[1];
-    }
-    
-    // Nettoyer les espaces et retours à la ligne
-    base64Data = base64Data.replace(/\s/g, '');
-    
-    // Décoder et sauvegarder
-    const buffer = Buffer.from(base64Data, 'base64');
-    
-    console.log(`Taille du buffer décodé: ${buffer.length} octets`);
-    
-    if (buffer.length < 100) {
-      throw new Error(`Image trop petite (${buffer.length} octets) - probablement corrompue ou incomplète. Une image DALL-E devrait faire au moins 5KB.`);
-    }
-    
-    const filepath = path.join(imagesDir, filename);
-    fs.writeFileSync(filepath, buffer);
-    
-    console.log(`Image sauvegardée avec succès: ${filepath} (${buffer.length} octets)`);
-    
-    return filepath;
-  } catch (error) {
-    console.error('Erreur lors du décodage base64:', error);
-    throw error;
-  }
-}
+// =================== ROUTES ===================
 
-// Route de test
-app.get('/', (req, res) => {
+// Root
+app.get("/", (req, res) => {
   res.json({
-    message: 'API Email avec Image - Serveur actif',
+    message: "API Email + Images (GitHub-backed) active",
     endpoints: {
-      sendEmailBase64: 'POST /send-email-base64 (pour GPT Assistant)',
-      sendEmailFile: 'POST /send-email-with-image (upload fichier)',
-      testImage: 'POST /test-image (tester le décodage)'
-    }
+      uploadImage: "POST /upload-image (multipart/form-data)",
+      sendEmailWithImage: "POST /send-email-with-image (JSON)",
+      uploadAndSendEmail: "POST /upload-and-send-email (multipart/form-data)",
+      listImages: "GET /list-images",
+      imageProxy: "GET /images/:filename (proxy raw GitHub -> même domaine)",
+      health: "GET /health",
+    },
   });
 });
 
-// Route de test pour vérifier le décodage base64
-app.post('/test-image', async (req, res) => {
-  try {
-    const { imageBase64, imageName } = req.body;
-
-    if (!imageBase64) {
-      return res.status(400).json({
-        success: false,
-        error: 'Le champ "imageBase64" est requis'
-      });
-    }
-
-    console.log('=== Test de décodage image ===');
-    console.log('Longueur base64 reçue:', imageBase64.length);
-    console.log('Premiers 100 caractères:', imageBase64.substring(0, 100));
-    console.log('Derniers 50 caractères:', imageBase64.substring(imageBase64.length - 50));
-
-    // Générer un nom de fichier de test
-    const timestamp = Date.now();
-    const extension = imageName ? path.extname(imageName) : '.png';
-    const filename = `test-${timestamp}${extension}`;
-
-    // Tenter de sauvegarder
-    const imagePath = saveBase64Image(imageBase64, filename);
-    const imageBuffer = fs.readFileSync(imagePath);
-
-    // Vérifier les magic bytes pour déterminer le type réel
-    let detectedType = 'Inconnu';
-    if (imageBuffer[0] === 0x89 && imageBuffer[1] === 0x50 && imageBuffer[2] === 0x4E && imageBuffer[3] === 0x47) {
-      detectedType = 'PNG';
-    } else if (imageBuffer[0] === 0xFF && imageBuffer[1] === 0xD8 && imageBuffer[2] === 0xFF) {
-      detectedType = 'JPEG';
-    } else if (imageBuffer[0] === 0x47 && imageBuffer[1] === 0x49 && imageBuffer[2] === 0x46) {
-      detectedType = 'GIF';
-    }
-
-    res.json({
-      success: true,
-      message: 'Image décodée avec succès',
-      data: {
-        filename: filename,
-        path: `/images/${filename}`,
-        base64Length: imageBase64.length,
-        bufferSize: imageBuffer.length,
-        detectedType: detectedType,
-        firstBytes: Array.from(imageBuffer.slice(0, 10)),
-        isValidImage: detectedType !== 'Inconnu'
-      }
-    });
-
-  } catch (error) {
-    console.error('Erreur lors du test:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Erreur lors du décodage',
-      details: error.message
-    });
-  }
+// Health
+app.get("/health", async (req, res) => {
+  const okGithub = Boolean(GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO);
+  const okPublicUrl = Boolean(PUBLIC_SERVER_URL);
+  res.json({
+    success: true,
+    githubConfigured: okGithub,
+    publicUrlConfigured: okPublicUrl,
+    smtpHost: SMTP_HOST,
+    branch: GITHUB_BRANCH,
+    imagesDir: GITHUB_IMAGES_DIR,
+  });
 });
 
-// Route pour envoyer un email avec image en BASE64 (pour GPT Assistant)
-app.post('/send-email-base64', async (req, res) => {
+// Upload image -> GitHub
+app.post("/upload-image", upload.single("image"), async (req, res) => {
   try {
-    const { to, subject, message, imageBase64, imageName } = req.body;
-
-    // Validation des champs requis
-    if (!to || !subject || !message) {
-      return res.status(400).json({
-        success: false,
-        error: 'Les champs "to", "subject" et "message" sont requis'
-      });
-    }
-
-    if (!imageBase64) {
-      return res.status(400).json({
-        success: false,
-        error: 'Le champ "imageBase64" est requis'
-      });
-    }
-
-    // Générer un nom de fichier unique
-    const timestamp = Date.now();
-    const randomNum = Math.round(Math.random() * 1E9);
-    const extension = imageName ? path.extname(imageName) : '.png';
-    const filename = `${timestamp}-${randomNum}${extension}`;
-
-    // Sauvegarder l'image décodée
-    const imagePath = saveBase64Image(imageBase64, filename);
-    console.log(`Image base64 décodée et sauvegardée: ${imagePath}`);
-
-    // Lire l'image en buffer
-    const imageBuffer = fs.readFileSync(imagePath);
-    
-    // Déterminer le type MIME
-    const ext = path.extname(filename).toLowerCase();
-    const mimeTypes = {
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif'
-    };
-    const mimeType = mimeTypes[ext] || 'image/png';
-    
-    // Configuration de l'email avec CID reference
-    const mailOptions = {
-      from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
-      to: to,
-      subject: subject,
-      html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px;">
-          <h2 style="color: #333;">${subject}</h2>
-          <p style="font-size: 14px; line-height: 1.6;">${message}</p>
-          <br>
-          <div style="margin: 20px 0;">
-            <p style="font-weight: bold; margin-bottom: 10px;">Image jointe ci-dessous:</p>
-            <img src="cid:uniqueImageCID@nodemailer" alt="Image" style="max-width: 100%; height: auto; display: block; border: 2px solid #ddd; border-radius: 4px; padding: 5px; background: #f9f9f9;">
-          </div>
-          <br>
-          <p style="font-size: 12px; color: #666;">Si l'image ne s'affiche pas, veuillez consulter la pièce jointe.</p>
-        </div>
-      `,
-      attachments: [
-        {
-          filename: filename,
-          content: imageBuffer,
-          contentType: mimeType,
-          cid: 'uniqueImageCID@nodemailer',
-          contentDisposition: 'inline'
-        },
-        {
-          filename: filename,
-          content: imageBuffer,
-          contentType: mimeType,
-          contentDisposition: 'attachment'
-        }
-      ]
-    };
-
-    // Envoyer l'email
-    const info = await transporter.sendMail(mailOptions);
-
-    console.log('Email envoyé avec succès:', info.messageId);
-
-    res.json({
-      success: true,
-      message: 'Email envoyé avec succès',
-      data: {
-        messageId: info.messageId,
-        imageSaved: filename,
-        imagePath: `/images/${filename}`,
-        recipient: to
-      }
-    });
-
-  } catch (error) {
-    console.error('Erreur lors de l\'envoi de l\'email:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Erreur lors de l\'envoi de l\'email',
-      details: error.message
-    });
-  }
-});
-
-// Route pour envoyer un email avec image (upload fichier classique)
-app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
-  try {
-    const { to, subject, message } = req.body;
-
-    // Validation des champs requis
-    if (!to || !subject || !message) {
-      return res.status(400).json({
-        success: false,
-        error: 'Les champs "to", "subject" et "message" sont requis'
-      });
-    }
-
     if (!req.file) {
+      return res.status(400).json({ success: false, error: "Champ 'image' requis (multipart/form-data)" });
+    }
+    if (!GITHUB_TOKEN || !GITHUB_OWNER || !GITHUB_REPO) {
+      return res.status(500).json({ success: false, error: "GitHub non configuré côté serveur" });
+    }
+
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    const uniqueName = `${Date.now()}-${crypto.randomInt(1e9)}${ext}`;
+
+    const { publicUrl, size } = await uploadToGitHub(uniqueName, req.file.buffer);
+
+    res.json({
+      success: true,
+      message: "Image uploadée avec succès",
+      data: {
+        filename: uniqueName,
+        publicUrl,
+        size,
+      },
+    });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// Send email with existing imageUrl (must be same domain)
+app.post("/send-email-with-image", async (req, res) => {
+  try {
+    const { to, subject, message, imageUrl } = req.body || {};
+    if (!to || !subject || !message || !imageUrl) {
+      return res.status(400).json({ success: false, error: "Champs requis: to, subject, message, imageUrl" });
+    }
+    if (!validateEmail(to)) {
+      return res.status(400).json({ success: false, error: "Format d'email invalide pour 'to'" });
+    }
+    if (!isSameDomain(imageUrl)) {
       return res.status(400).json({
         success: false,
-        error: 'Aucune image n\'a été uploadée'
+        error: `imageUrl doit être sur le même domaine que ${PUBLIC_SERVER_URL}. Uploade d'abord via /upload-image.`,
       });
     }
 
-    // Chemin complet de l'image sauvegardée
-    const imagePath = req.file.path;
-    const imageName = req.file.filename;
+    // Télécharge l'image (depuis /images/xxx de ce serveur)
+    const resp = await axios.get(imageUrl, { responseType: "arraybuffer" });
+    const buffer = Buffer.from(resp.data);
+    if (buffer.length < 100) {
+      return res.status(400).json({ success: false, error: "Image trop petite ou invalide" });
+    }
 
-    console.log(`Image sauvegardée: ${imagePath}`);
+    // Devine un nom et un type
+    const urlObj = new URL(imageUrl);
+    const filename = path.basename(urlObj.pathname) || `image-${Date.now()}.png`;
+    const mimeType = guessMime(filename);
 
-    // Lire l'image en buffer
-    const imageBuffer = fs.readFileSync(imagePath);
-    
-    // Déterminer le type MIME
-    const ext = path.extname(imageName).toLowerCase();
-    const mimeTypes = {
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif'
-    };
-    const mimeType = mimeTypes[ext] || 'image/png';
-
-    // Configuration de l'email avec CID reference
-    const mailOptions = {
-      from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
-      to: to,
-      subject: subject,
-      html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px;">
-          <h2 style="color: #333;">${subject}</h2>
-          <p style="font-size: 14px; line-height: 1.6;">${message}</p>
-          <br>
-          <div style="margin: 20px 0;">
-            <p style="font-weight: bold; margin-bottom: 10px;">Image jointe ci-dessous:</p>
-            <img src="cid:uniqueImageCID@nodemailer" alt="Image" style="max-width: 100%; height: auto; display: block; border: 2px solid #ddd; border-radius: 4px; padding: 5px; background: #f9f9f9;">
-          </div>
-          <br>
-          <p style="font-size: 12px; color: #666;">Si l'image ne s'affiche pas, veuillez consulter la pièce jointe.</p>
+    // Email HTML (preserve \n avec white-space: pre-line)
+    const html = `
+      <div style="font-family: Arial, sans-serif; padding: 16px;">
+        <h2 style="color:#333;">${escapeHtml(subject)}</h2>
+        <p style="white-space: pre-line; font-size:14px; line-height:1.6;">${escapeHtml(message)}</p>
+        <div style="margin-top:16px;">
+          <p style="font-weight:bold; margin: 8px 0;">Image inline :</p>
+          <img src="cid:imgcid@inline" alt="Image" style="max-width:100%; height:auto; display:block; border:1px solid #ddd; border-radius:6px; padding:4px; background:#fafafa;">
         </div>
-      `,
+        <p style="color:#777; font-size:12px; margin-top:12px;">Si l'image ne s'affiche pas, vérifiez la pièce jointe.</p>
+      </div>
+    `;
+
+    const info = await transporter.sendMail({
+      from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
+      to,
+      subject: subject,
+      html,
       attachments: [
         {
-          filename: imageName,
-          content: imageBuffer,
+          filename,
+          content: buffer,
           contentType: mimeType,
-          cid: 'uniqueImageCID@nodemailer',
-          contentDisposition: 'inline'
+          cid: "imgcid@inline",
+          contentDisposition: "inline",
         },
         {
-          filename: imageName,
-          content: imageBuffer,
+          filename,
+          content: buffer,
           contentType: mimeType,
-          contentDisposition: 'attachment'
-        }
-      ]
-    };
-
-    // Envoyer l'email
-    const info = await transporter.sendMail(mailOptions);
-
-    console.log('Email envoyé avec succès:', info.messageId);
+          contentDisposition: "attachment",
+        },
+      ],
+    });
 
     res.json({
       success: true,
-      message: 'Email envoyé avec succès',
+      message: "Email envoyé avec succès",
       data: {
         messageId: info.messageId,
-        imageSaved: imageName,
-        imagePath: `/images/${imageName}`,
-        recipient: to
-      }
+        recipient: to,
+        imageUrl,
+        imageSize: buffer.length,
+        timestamp: new Date().toISOString(),
+      },
     });
-
-  } catch (error) {
-    console.error('Erreur lors de l\'envoi de l\'email:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Erreur lors de l\'envoi de l\'email',
-      details: error.message
-    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Erreur lors de l'envoi de l'email", details: err.message });
   }
 });
 
-// Route pour lister les images dans le dossier
-app.get('/images', (req, res) => {
+// Upload + Send (1 étape)
+app.post("/upload-and-send-email", upload.single("image"), async (req, res) => {
   try {
-    const files = fs.readdirSync(imagesDir);
-    const images = files.filter(file => {
-      const ext = path.extname(file).toLowerCase();
-      return ['.jpg', '.jpeg', '.png', '.gif'].includes(ext);
+    const { to, subject, message } = req.body || {};
+    if (!req.file) return res.status(400).json({ success: false, error: "Champ 'image' requis (multipart/form-data)" });
+    if (!to || !subject || !message) {
+      return res.status(400).json({ success: false, error: "Champs requis: to, subject, message" });
+    }
+    if (!validateEmail(to)) {
+      return res.status(400).json({ success: false, error: "Format d'email invalide pour 'to'" });
+    }
+    if (!GITHUB_TOKEN || !GITHUB_OWNER || !GITHUB_REPO) {
+      return res.status(500).json({ success: false, error: "GitHub non configuré côté serveur" });
+    }
+
+    const ext = path.extname(req.file.originalname).toLowerCase();
+    const uniqueName = `${Date.now()}-${crypto.randomInt(1e9)}${ext}`;
+
+    // 1) Upload vers GitHub
+    const { publicUrl, size } = await uploadToGitHub(uniqueName, req.file.buffer);
+
+    // 2) Envoi d'email via l'URL (même domaine)
+    const resp = await axios.get(publicUrl, { responseType: "arraybuffer" });
+    const buffer = Buffer.from(resp.data);
+    const mimeType = guessMime(uniqueName);
+
+    const html = `
+      <div style="font-family: Arial, sans-serif; padding: 16px;">
+        <h2 style="color:#333;">${escapeHtml(subject)}</h2>
+        <p style="white-space: pre-line; font-size:14px; line-height:1.6;">${escapeHtml(message)}</p>
+        <div style="margin-top:16px;">
+          <p style="font-weight:bold; margin: 8px 0;">Image inline :</p>
+          <img src="cid:imgcid@inline" alt="Image" style="max-width:100%; height:auto; display:block; border:1px solid #ddd; border-radius:6px; padding:4px; background:#fafafa;">
+        </div>
+        <p style="color:#777; font-size:12px; margin-top:12px;">Si l'image ne s'affiche pas, vérifiez la pièce jointe.</p>
+      </div>
+    `;
+
+    const info = await transporter.sendMail({
+      from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
+      to,
+      subject,
+      html,
+      attachments: [
+        {
+          filename: uniqueName,
+          content: buffer,
+          contentType: mimeType,
+          cid: "imgcid@inline",
+          contentDisposition: "inline",
+        },
+        {
+          filename: uniqueName,
+          content: buffer,
+          contentType: mimeType,
+          contentDisposition: "attachment",
+        },
+      ],
     });
 
     res.json({
       success: true,
-      count: images.length,
-      images: images
+      message: "Image uploadée et email envoyé avec succès",
+      data: {
+        messageId: info.messageId,
+        recipient: to,
+        imageUrl: publicUrl,
+        imageSize: size,
+        timestamp: new Date().toISOString(),
+      },
     });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: 'Erreur lors de la lecture du dossier images',
-      details: error.message
-    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Erreur upload+send", details: err.message });
   }
 });
 
-// Gestion des erreurs globales
-app.use((error, req, res, next) => {
-  if (error instanceof multer.MulterError) {
-    if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({
-        success: false,
-        error: 'Le fichier est trop volumineux (max 10MB)'
-      });
+// List images
+app.get("/list-images", async (req, res) => {
+  try {
+    if (!GITHUB_TOKEN || !GITHUB_OWNER || !GITHUB_REPO) {
+      return res.status(500).json({ success: false, error: "GitHub non configuré côté serveur" });
     }
+    const items = await listGitHubImages();
+    res.json({ success: true, count: items.length, images: items });
+  } catch (err) {
+    res.status(500).json({ success: false, error: "Erreur list-images", details: err.message });
   }
-  res.status(500).json({
-    success: false,
-    error: error.message
-  });
 });
 
-// Démarrer le serveur
+// Global errors
+app.use((err, req, res, next) => {
+  if (err && /File too large/i.test(err.message)) {
+    return res.status(400).json({ success: false, error: "Fichier trop volumineux (max 50MB)" });
+  }
+  return res.status(500).json({ success: false, error: err?.message || "Erreur serveur" });
+});
+
+// Start
 app.listen(PORT, () => {
-  console.log(`========================================`);
+  console.log("========================================");
   console.log(`🚀 Serveur démarré sur le port ${PORT}`);
+  console.log(`🌐 Domaine public: ${PUBLIC_SERVER_URL}`);
+  console.log(`📦 GitHub: ${GITHUB_OWNER}/${GITHUB_REPO}#${GITHUB_BRANCH} (${GITHUB_IMAGES_DIR})`);
   console.log(`📧 SMTP: ${SMTP_HOST}:${SMTP_PORT}`);
-  console.log(`📁 Dossier images: ${imagesDir}`);
-  console.log(`========================================`);
+  console.log("========================================");
 });
