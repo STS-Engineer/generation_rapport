@@ -79,7 +79,7 @@ function saveBase64Image(base64String, filename) {
     console.log(`Taille du buffer décodé: ${buffer.length} octets`);
     
     if (buffer.length < 100) {
-      throw new Error(`Image trop petite (${buffer.length} octets) - probablement corrompue ou incomplète. Une image DALL-E devrait faire au moins 5KB.`);
+      throw new Error(`Image trop petite (${buffer.length} octets) - probablement corrompue`);
     }
     
     const filepath = path.join(imagesDir, filename);
