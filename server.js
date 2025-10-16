@@ -1,600 +1,269 @@
-# Email API – code corrigé (Express/Nodemailer) & OpenAPI
-
-> ✅ Ce document contient **le code corrigé** et **le fichier OpenAPI**. Copiez-collez tel quel.
-
----
-
-## `server.js`
-
-```javascript
-require('dotenv').config();
+// server.js
 const express = require('express');
 const nodemailer = require('nodemailer');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const https = require('https');
-const http = require('http');
-const { pipeline } = require('stream');
-const util = require('util');
-const streamPipeline = util.promisify(pipeline);
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = process.env.PORT || 3000;
 
 /* ========================= CONFIG ========================= */
-// IMPORTANT : utilisez des variables d'environnement en production
-const SMTP_HOST = process.env.SMTP_HOST || 'smtp.office365.com';
-const SMTP_PORT = Number(process.env.SMTP_PORT) || 587; // 587 (STARTTLS) recommandé pour O365
-const SMTP_SECURE = String(process.env.SMTP_SECURE || 'false') === 'true'; // false pour STARTTLS
-const SMTP_USER = process.env.SMTP_USER || undefined; // ex: no-reply@avocarbon.com
-const SMTP_PASS = process.env.SMTP_PASS || undefined;
-const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || 'Administration STS';
-const EMAIL_FROM = process.env.EMAIL_FROM || 'administration.STS@avocarbon.com';
+const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
+const SMTP_PORT = 25;
+const EMAIL_FROM_NAME = "Administration STS";
+const EMAIL_FROM = "administration.STS@avocarbon.com";
+const MIN_IMAGE_SIZE = 1024; // bytes (1KB) – protège contre les payloads tronquées
 
-// URL publique de votre serveur Azure (sans slash final)
-const RAW_PUBLIC_URL = process.env.PUBLIC_SERVER_URL || 'https://pdf-api.azurewebsites.net';
-const PUBLIC_SERVER_URL = RAW_PUBLIC_URL.replace(/\/$/, '');
-const PUBLIC_HOSTNAME = (() => { try { return new URL(PUBLIC_SERVER_URL).hostname; } catch { return null; }})();
-if (!PUBLIC_HOSTNAME) {
-  throw new Error('PUBLIC_SERVER_URL invalide. Exemple: https://pdf-api.azurewebsites.net');
-}
-
-// Créer le dossier images s'il n'existe pas
+/* ========================= FS ========================= */
 const imagesDir = path.join(__dirname, 'images');
-if (!fs.existsSync(imagesDir)) {
-  fs.mkdirSync(imagesDir, { recursive: true });
-  console.log('Dossier images créé');
-}
+if (!fs.existsSync(imagesDir)) fs.mkdirSync(imagesDir, { recursive: true });
 
-// Middleware
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+/* ========================= MIDDLEWARE ========================= */
+// Global – utile pour les autres routes
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// Servir les images publiquement (cache long, pas d'ETag)
-app.use('/images', express.static(imagesDir, { maxAge: '1y', etag: false }));
-
-// Configuration Multer
+/* ========================= MULTER (multipart) ========================= */
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, imagesDir),
-  filename: (_req, file, cb) => {
-    const timestamp = Date.now();
-    const randomNum = Math.round(Math.random() * 1e9);
-    const ext = (path.extname(file.originalname) || '.png').toLowerCase();
-    cb(null, `img-${timestamp}-${randomNum}${ext}`);
-  }
+  destination: (req, file, cb) => cb(null, imagesDir),
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${Math.round(Math.random()*1e9)}${path.extname(file.originalname)}`)
 });
-
 const upload = multer({
   storage,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
-  fileFilter: (_req, file, cb) => {
-    const allowed = /^(image\/(jpeg|png|gif|webp))$/i;
-    if (allowed.test(file.mimetype)) return cb(null, true);
-    cb(new Error('Seules les images sont autorisées (jpeg, jpg, png, gif, webp)'));
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ok = /jpeg|jpg|png|gif|bmp|webp/.test(file.mimetype);
+    ok ? cb(null, true) : cb(new Error('Format non supporté'));
   }
 });
 
-// Transporteur SMTP (Office 365 par défaut). Supporte aussi SMTP sans auth si nécessaire.
+/* ========================= SMTP ========================= */
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
-  secure: SMTP_SECURE, // true = SMTPS (465), false = STARTTLS
-  auth: SMTP_USER && SMTP_PASS ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
+  secure: false,
   tls: { rejectUnauthorized: false }
 });
-
-transporter.verify().then(() => {
-  console.log('✅ Transport SMTP prêt');
-}).catch(err => {
-  console.warn('⚠️  Vérification SMTP échouée:', err.message);
+transporter.verify(err => {
+  if (err) console.log('✗ SMTP Error:', err.message);
+  else console.log('✓ SMTP Ready');
 });
 
-// Utilitaire : échapper HTML (sécurité XSS si on réinjecte sujet/message)
-function escapeHtml(text = '') {
-  const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-  return String(text).replace(/[&<>"']/g, (m) => map[m]);
+/* ========================= HELPERS ========================= */
+function normalizeBase64Payload(raw) {
+  if (!raw || typeof raw !== 'string') throw new Error('Payload Base64 manquante');
+  let b64 = raw.trim();
+
+  // Extraire dataURL si présente
+  if (b64.startsWith('data:')) {
+    const m = b64.match(/^data:([^;]+);base64,(.*)$/);
+    if (m) b64 = m[2];
+  } else if (b64.includes('base64,')) {
+    b64 = b64.split('base64,').pop();
+  }
+
+  // Si URL-encodé (%xx), décoder
+  if (/%[0-9A-Fa-f]{2}/.test(b64)) {
+    try { b64 = decodeURIComponent(b64); } catch { /* ignore */ }
+  }
+
+  // x-www-form-urlencoded : espaces → '+'
+  b64 = b64.replace(/ /g, '+');
+
+  // base64url → base64 standard
+  b64 = b64.replace(/-/g, '+').replace(/_/g, '/');
+
+  // Nettoyage doux : CR/LF/TAB
+  b64 = b64.replace(/[\r\n\t]/g, '');
+
+  // Retirer les caractères non base64 restants (tolérant)
+  b64 = b64.replace(/[^A-Za-z0-9+/=]/g, '');
+
+  // Padding
+  const mod = b64.length % 4;
+  if (mod === 2) b64 += '==';
+  else if (mod === 3) b64 += '=';
+  else if (mod === 1) throw new Error('Base64 invalide (longueur %4 == 1)');
+
+  return b64;
 }
 
-// Utilitaire : télécharger une image depuis une URL (même origine uniquement) avec garde-fous
-async function downloadImageSameOrigin(imageUrl, filepath, { timeoutMs = 15000, maxBytes = 50 * 1024 * 1024 } = {}) {
-  const urlObj = new URL(imageUrl);
+function sniffImageType(buffer) {
+  const m = buffer.slice(0, 8);
+  if (m[0] === 0x89 && m[1] === 0x50 && m[2] === 0x4E && m[3] === 0x47) return { type: 'image/png', ext: '.png' };
+  if (m[0] === 0xFF && m[1] === 0xD8 && m[2] === 0xFF) return { type: 'image/jpeg', ext: '.jpg' };
+  if (m[0] === 0x47 && m[1] === 0x49 && m[2] === 0x46) return { type: 'image/gif', ext: '.gif' };
+  if (m[0] === 0x42 && m[1] === 0x4D) return { type: 'image/bmp', ext: '.bmp' };
+  return { type: 'unknown', ext: '.bin' };
+}
 
-  // ✅ Empêche l’SSRF : uniquement le même domaine que PUBLIC_SERVER_URL
-  if (urlObj.hostname !== PUBLIC_HOSTNAME) {
-    throw new Error(`imageUrl doit appartenir au domaine autorisé: ${PUBLIC_HOSTNAME}`);
+function decodeAndSaveImage(base64String, filename) {
+  // Log utile au debug
+  console.log('\n--- DÉCODAGE IMAGE ---');
+  console.log(`Input length: ${base64String?.length ?? 0} chars`);
+
+  const b64 = normalizeBase64Payload(base64String);
+  const estBytes = Math.floor((b64.replace(/=+$/, '').length * 3) / 4);
+  console.log(`Normalized length: ${b64.length} chars (≈${estBytes} bytes attendus)`);
+
+  const buffer = Buffer.from(b64, 'base64');
+  console.log(`Buffer size: ${buffer.length} bytes`);
+  console.log('Hex head:', buffer.slice(0, 12).toString('hex'));
+
+  if (buffer.length < MIN_IMAGE_SIZE) {
+    throw new Error(`Image corrompue/tronquée (taille ${buffer.length} bytes < ${MIN_IMAGE_SIZE})`);
   }
-  if (!/^https?:$/.test(urlObj.protocol)) {
-    throw new Error('Protocole invalide');
-  }
 
-  const client = urlObj.protocol === 'https:' ? https : http;
+  const sniff = sniffImageType(buffer);
+  let finalFilename = (filename || `image_${Date.now()}`).replace(/\.[^.]+$/, '') + sniff.ext;
+  const filepath = path.join(imagesDir, finalFilename);
+  fs.writeFileSync(filepath, buffer);
 
-  await new Promise((resolve, reject) => {
-    const req = client.get(
-      {
-        hostname: urlObj.hostname,
-        path: urlObj.pathname + (urlObj.search || ''),
-        protocol: urlObj.protocol,
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      },
-      (res) => {
-        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          // Refuse les redirections vers d’autres domaines
-          try {
-            const redir = new URL(res.headers.location, imageUrl);
-            if (redir.hostname !== PUBLIC_HOSTNAME) return reject(new Error('Redirection externe interdite'));
-            // Relance simple :
-            return downloadImageSameOrigin(redir.toString(), filepath, { timeoutMs, maxBytes }).then(resolve).catch(reject);
-          } catch (e) { return reject(e); }
-        }
-
-        if (res.statusCode !== 200) return reject(new Error(`Échec du téléchargement: ${res.statusCode}`));
-
-        const ct = (res.headers['content-type'] || '').toLowerCase();
-        if (!/^image\/(png|jpeg|jpg|gif|webp)/.test(ct)) {
-          return reject(new Error(`Type de contenu non supporté: ${ct || 'inconnu'}`));
-        }
-
-        const file = fs.createWriteStream(filepath);
-        let received = 0;
-        res.on('data', (chunk) => {
-          received += chunk.length;
-          if (received > maxBytes) {
-            req.destroy(new Error('Fichier trop volumineux'));
-          }
-        });
-
-        streamPipeline(res, file).then(resolve).catch(reject);
-      }
-    );
-
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('Timeout téléchargement image')));
-    req.on('error', (err) => {
-      try { fs.unlinkSync(filepath); } catch {}
-      reject(err);
-    });
-  });
+  console.log(`✓ Saved: ${finalFilename} (${sniff.type})\n`);
+  return { filepath, buffer, filename: finalFilename, mimeType: sniff.type, size: buffer.length };
 }
 
 /* ========================= ROUTES ========================= */
 app.get('/', (_req, res) => {
   res.json({
-    message: 'API Email avec Images Publiques',
-    version: '3.3.0',
-    serverUrl: PUBLIC_SERVER_URL,
+    status: 'online',
+    version: '4.3 - PJ fiable',
     endpoints: {
-      uploadImage: 'POST /upload-image',
-      sendEmail: 'POST /send-email-with-image',
-      uploadAndSend: 'POST /upload-and-send-email',
-      listImages: 'GET /list-images',
-      health: 'GET /health'
+      'POST /send-email-base64': 'Email avec image en Base64 (JSON uniquement)',
+      'POST /send-email-with-image': 'Email avec upload fichier (multipart)',
+      'POST /test-decode': 'Tester le décodage local',
+      'GET /images': 'Lister les images sauvegardées'
     }
   });
 });
 
-app.get('/health', (_req, res) => {
-  res.json({ success: true, status: 'Service actif', timestamp: new Date().toISOString() });
-});
-
-// 1) Upload image => retourne URL publique
-app.post('/upload-image', upload.single('image'), async (req, res) => {
+app.post('/test-decode', (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ success: false, error: "Aucune image n'a été reçue" });
+    const { imageBase64, testName } = req.body;
+    if (!imageBase64) return res.status(400).json({ error: 'imageBase64 requis' });
 
-    const { filename, size, path: filePath } = req.file;
-    if (size < 100) {
-      try { fs.unlinkSync(filePath); } catch {}
-      return res.status(400).json({ success: false, error: `Image trop petite (${size} octets)` });
-    }
-
-    const publicImageUrl = `${PUBLIC_SERVER_URL}/images/${filename}`;
-    res.json({ success: true, message: 'Image uploadée et hébergée avec succès', data: { filename, size, publicUrl: publicImageUrl, timestamp: new Date().toISOString() } });
-  } catch (error) {
-    console.error('❌ Erreur upload:', error);
-    if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch {} }
-    res.status(500).json({ success: false, error: "Erreur lors de l'upload de l'image", details: error.message });
+    const result = decodeAndSaveImage(imageBase64, (testName || `test_${Date.now()}`) + '.png');
+    res.json({
+      success: true,
+      message: 'Image décodée avec succès',
+      data: {
+        filename: result.filename,
+        size: result.size,
+        mimeType: result.mimeType,
+        path: `/images/${result.filename}`
+      }
+    });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
   }
 });
 
-// 2) Envoyer email avec image (référence via URL publique même origine)
-app.post('/send-email-with-image', async (req, res) => {
+// ==== Envoi avec Base64 en JSON (recommandé si tu ne peux pas faire multipart) ====
+app.post('/send-email-base64', express.json({ limit: '100mb' }), async (req, res) => {
   try {
-    const { to, subject, message, imageUrl } = req.body || {};
-
-    if (!to || !subject || !message) return res.status(400).json({ success: false, error: 'Les champs "to", "subject" et "message" sont requis' });
-    if (!imageUrl || !/^https?:\/\//.test(imageUrl)) return res.status(400).json({ success: false, error: 'Le champ "imageUrl" est requis et doit être une URL valide' });
-
-    // Téléchargement sécurisé (même domaine)
-    const timestamp = Date.now();
-    const randomNum = Math.round(Math.random() * 1e9);
-    const tempFilename = `temp-${timestamp}-${randomNum}.bin`;
-    const tempPath = path.join(imagesDir, tempFilename);
-
-    await downloadImageSameOrigin(imageUrl, tempPath);
-
-    const imageBuffer = fs.readFileSync(tempPath);
-    const imageSize = imageBuffer.length;
-    if (imageSize < 100) {
-      try { fs.unlinkSync(tempPath); } catch {}
-      return res.status(400).json({ success: false, error: `Image invalide ou trop petite (${imageSize} octets)` });
-    }
-
-    // Détermine le type MIME à partir de l'extension de l'URL, fallback image/png
-    const extLower = (path.extname(new URL(imageUrl).pathname) || '.png').toLowerCase();
-    const mimeTypes = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
-    const mimeType = mimeTypes[extLower] || 'image/png';
-
-    const html = `
-      <div style="font-family: Arial, sans-serif; padding: 20px; background: #f5f5f5;">
-        <div style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-          <h2 style="color: #333; margin-top: 0;">${escapeHtml(subject)}</h2>
-          <p style="font-size: 14px; line-height: 1.6; color: #555; white-space: pre-line;">${escapeHtml(message)}</p>
-          <hr style="border: none; border-top: 1px solid #ddd; margin: 20px 0;">
-          <div style="margin: 20px 0; text-align: center;">
-            <p style="font-weight: bold; margin-bottom: 15px; color: #333;">Pièce jointe :</p>
-            <img src="cid:imageContent@email" alt="Image" style="max-width: 100%; height: auto; display: block; border: 2px solid #ddd; border-radius: 4px; padding: 5px; background: #f9f9f9;">
-          </div>
-          <p style="font-size: 12px; color: #999; margin-top: 20px; border-top: 1px solid #eee; padding-top: 10px;">
-            Message envoyé par Administration STS
-          </p>
-        </div>
-      </div>`;
-
-    const mailOptions = {
-      from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
-      to,
-      subject,
-      html,
-      attachments: [
-        { filename: path.basename(new URL(imageUrl).pathname) || 'image', content: imageBuffer, contentType: mimeType, cid: 'imageContent@email', contentDisposition: 'inline' }
-      ]
-    };
-
-    const info = await transporter.sendMail(mailOptions);
-
-    try { fs.unlinkSync(tempPath); } catch {}
-
-    res.json({ success: true, message: 'Email envoyé avec succès', data: { messageId: info.messageId, recipient: to, imageUrl, imageSize, timestamp: new Date().toISOString() } });
-  } catch (error) {
-    console.error('❌ Erreur send-email-with-image:', error);
-    res.status(500).json({ success: false, error: "Erreur lors de l'envoi de l'email", details: error.message });
-  }
-});
-
-// 3) Route combinée : upload + envoyer email
-app.post('/upload-and-send-email', upload.single('image'), async (req, res) => {
-  try {
-    const { to, subject, message } = req.body || {};
+    const { to, subject, message, imageBase64, imageName } = req.body;
 
     if (!to || !subject || !message) {
-      if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch {} }
-      return res.status(400).json({ success: false, error: 'Les champs "to", "subject" et "message" sont requis' });
+      return res.status(400).json({ success: false, error: 'Champs "to", "subject" et "message" requis' });
     }
-    if (!req.file) return res.status(400).json({ success: false, error: "Aucune image n'a été reçue" });
-
-    const { filename, size, path: filePath } = req.file;
-    if (size < 100) {
-      try { fs.unlinkSync(filePath); } catch {}
-      return res.status(400).json({ success: false, error: `Image trop petite (${size} octets)` });
+    if (!imageBase64) {
+      return res.status(400).json({ success: false, error: 'Champ "imageBase64" requis' });
     }
 
-    const publicImageUrl = `${PUBLIC_SERVER_URL}/images/${filename}`;
-    const ext = path.extname(filename).toLowerCase();
-    const mimeTypes = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' };
-    const mimeType = mimeTypes[ext] || 'image/png';
-    const imageBuffer = fs.readFileSync(filePath);
+    const img = decodeAndSaveImage(imageBase64, imageName || `image_${Date.now()}.jpg`);
+    if (img.size < MIN_IMAGE_SIZE) throw new Error('Pièce jointe trop petite : payload invalide');
 
-    const html = `
-      <div style="font-family: Arial, sans-serif; padding: 20px; background: #f5f5f5;">
-        <div style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-          <h2 style="color: #333; margin-top: 0;">${escapeHtml(subject)}</h2>
-          <p style="font-size: 14px; line-height: 1.6; color: #555; white-space: pre-line;">${escapeHtml(message)}</p>
-          <hr style="border: none; border-top: 1px solid #ddd; margin: 20px 0;">
-          <div style="margin: 20px 0; text-align: center;">
-            <p style="font-weight: bold; margin-bottom: 15px; color: #333;">Pièce jointe :</p>
-            <img src="cid:imageContent@email" alt="Image" style="max-width: 100%; height: auto; display: block; border: 2px solid #ddd; border-radius: 4px; padding: 5px; background: #f9f9f9;">
-          </div>
-          <p style="font-size: 12px; color: #999; margin-top: 20px; border-top: 1px solid #eee; padding-top: 10px;">
-            Message envoyé par Administration STS
-          </p>
-        </div>
-      </div>`;
+    const contentType = img.mimeType !== 'unknown' ? img.mimeType : 'application/octet-stream';
 
-    const mailOptions = {
+    const info = await transporter.sendMail({
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
       to,
       subject,
-      html,
-      attachments: [
-        { filename, content: imageBuffer, contentType: mimeType, cid: 'imageContent@email', contentDisposition: 'inline' }
-      ]
-    };
+      html: `
+        <p style="font-family:Segoe UI,Arial,sans-serif"> ${message}</p>
+        <p style="font-family:Segoe UI,Arial,sans-serif">
+          <strong>Image jointe :</strong> ${img.filename} — ${(img.size/1024).toFixed(1)} KB
+        </p>`,
+      attachments: [{ filename: img.filename, content: img.buffer, contentType }]
+    });
 
-    const info = await transporter.sendMail(mailOptions);
-
-    res.json({ success: true, message: 'Image uploadée et email envoyé avec succès', data: { messageId: info.messageId, filename, publicUrl: publicImageUrl, imageSize: size, recipient: to, timestamp: new Date().toISOString() } });
-  } catch (error) {
-    console.error('❌ Erreur upload-and-send-email:', error);
-    if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch {} }
-    res.status(500).json({ success: false, error: "Erreur lors de l'upload/envoi", details: error.message });
+    res.json({
+      success: true,
+      message: 'Email envoyé avec succès',
+      data: {
+        messageId: info.messageId,
+        image: { filename: img.filename, size: img.size, type: contentType, path: img.filepath },
+        recipient: to,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
   }
 });
 
-// 4) Lister les images hébergées
-app.get('/list-images', (_req, res) => {
+// ==== Envoi avec upload de fichier (multipart) – meilleur pour éviter tout problème Base64 ====
+app.post('/send-email-with-image', upload.single('image'), async (req, res) => {
   try {
-    const files = fs.readdirSync(imagesDir);
-    const images = files
-      .filter((f) => ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(path.extname(f).toLowerCase()))
-      .map((file) => ({ filename: file, url: `${PUBLIC_SERVER_URL}/images/${file}`, path: `/images/${file}` }));
-
-    res.json({ success: true, count: images.length, serverUrl: PUBLIC_SERVER_URL, images });
-  } catch (error) {
-    res.status(500).json({ success: false, error: 'Erreur lors de la lecture des images', details: error.message });
-  }
-});
-
-// Gestion des erreurs Multer et générales
-app.use((error, _req, res, _next) => {
-  if (error instanceof multer.MulterError) {
-    if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ success: false, error: 'Le fichier est trop volumineux (max 50MB)' });
+    const { to, subject, message } = req.body;
+    if (!to || !subject || !message || !req.file) {
+      return res.status(400).json({ success: false, error: 'Champs manquants' });
     }
-    return res.status(400).json({ success: false, error: `Erreur upload: ${error.message}` });
+
+    const buf = fs.readFileSync(req.file.path);
+    if (buf.length < MIN_IMAGE_SIZE) throw new Error('Fichier trop petit (probablement corrompu)');
+
+    const ext = path.extname(req.file.filename).toLowerCase();
+    const mime = {
+      '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif', '.bmp': 'image/bmp', '.webp': 'image/webp'
+    }[ext] || 'application/octet-stream';
+
+    const info = await transporter.sendMail({
+      from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
+      to,
+      subject,
+      html: `<p style="font-family:Segoe UI,Arial,sans-serif">${message}</p>
+             <p style="font-family:Segoe UI,Arial,sans-serif"><strong>Image jointe :</strong> ${req.file.filename}</p>`,
+      attachments: [{ filename: req.file.filename, content: buf, contentType: mime }]
+    });
+
+    res.json({ success: true, messageId: info.messageId, filename: req.file.filename });
+  } catch (e) {
+    res.status(400).json({ success: false, error: e.message });
   }
-  res.status(500).json({ success: false, error: error.message || 'Erreur serveur' });
 });
 
+// Liste des images sauvegardées
+app.get('/images', (_req, res) => {
+  try {
+    const files = fs.readdirSync(imagesDir).filter(f => /\.(jpg|jpeg|png|gif|bmp|webp)$/i.test(f));
+    res.json({
+      success: true,
+      count: files.length,
+      images: files.map(name => {
+        const s = fs.statSync(path.join(imagesDir, name));
+        return { name, size: s.size, created: s.birthtime };
+      })
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// Gestion erreurs multer / génériques
+app.use((err, _req, res, _next) => {
+  if (err instanceof multer.MulterError) return res.status(400).json({ error: err.message });
+  res.status(500).json({ error: err.message });
+});
+
+/* ========================= START ========================= */
 app.listen(PORT, () => {
   console.log('========================================');
-  console.log(`🚀 Serveur démarré sur le port ${PORT}`);
-  console.log(`🌐 URL Publique: ${PUBLIC_SERVER_URL}`);
-  console.log(`📧 SMTP: ${SMTP_HOST}:${SMTP_PORT} (secure=${SMTP_SECURE})`);
-  console.log(`📁 Dossier images: ${imagesDir}`);
-  console.log('\n✅ Routes disponibles:');
-  console.log('   1️⃣  POST /upload-image');
-  console.log('   2️⃣  POST /send-email-with-image');
-  console.log('   3️⃣  POST /upload-and-send-email (COMBINÉ)');
-  console.log('   📋 GET /list-images');
-  console.log('   🏥 GET /health');
-  console.log('========================================');
+  console.log('🚀 Email API v4.3 - PJ fiable');
+  console.log(`📡 Port: ${PORT}`);
+  console.log(`📧 SMTP: ${SMTP_HOST}:${SMTP_PORT}`);
+  console.log(`📁 Images: ${imagesDir}`);
+  console.log('========================================\n');
 });
-```
-
----
-
-## `openapi.json`
-
-```json
-{
-  "openapi": "3.1.0",
-  "info": {
-    "title": "Email API - Images Publiques Hébergées",
-    "description": "API pour uploader des images et envoyer des emails avec images (même origine sécurisée)",
-    "version": "3.3.0"
-  },
-  "servers": [
-    { "url": "https://pdf-api.azurewebsites.net", "description": "Serveur Azure Production" }
-  ],
-  "paths": {
-    "/upload-image": {
-      "post": {
-        "operationId": "uploadImage",
-        "summary": "Uploader une image et recevoir l'URL publique",
-        "description": "Étape 1: Upload de l'image, hébergement local et retour de l'URL publique",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "multipart/form-data": {
-              "schema": {
-                "type": "object",
-                "required": ["image"],
-                "properties": {
-                  "image": {
-                    "type": "string",
-                    "format": "binary",
-                    "description": "Fichier image (PNG, JPG, JPEG, GIF, WebP) – max 50MB"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Image uploadée avec succès",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "success": { "type": "boolean", "example": true },
-                    "message": { "type": "string" },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "filename": { "type": "string", "example": "img-1698765432-123456.png" },
-                        "publicUrl": { "type": "string", "example": "https://pdf-api.azurewebsites.net/images/img-1698765432-123456.png" },
-                        "size": { "type": "integer", "example": 123456 },
-                        "timestamp": { "type": "string", "format": "date-time" }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "400": { "description": "Erreur – Aucune image ou format invalide" },
-          "500": { "description": "Erreur serveur" }
-        }
-      }
-    },
-    "/send-email-with-image": {
-      "post": {
-        "operationId": "sendEmailWithImage",
-        "summary": "Envoyer un email avec une image hébergée",
-        "description": "Étape 2: Envoi d'un email avec l'image hébergée. L'URL doit appartenir au même domaine que le serveur pour éviter l'SSRF.",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["to", "subject", "message", "imageUrl"],
-                "properties": {
-                  "to": { "type": "string", "format": "email", "example": "client@example.com" },
-                  "subject": { "type": "string", "example": "Votre devis" },
-                  "message": { "type": "string", "example": "Veuillez trouver votre devis ci-joint" },
-                  "imageUrl": { "type": "string", "example": "https://pdf-api.azurewebsites.net/images/img-1698765432-123456.png" }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Email envoyé avec succès",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "success": { "type": "boolean", "example": true },
-                    "message": { "type": "string" },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "messageId": { "type": "string" },
-                        "recipient": { "type": "string", "format": "email" },
-                        "imageUrl": { "type": "string" },
-                        "imageSize": { "type": "integer" },
-                        "timestamp": { "type": "string", "format": "date-time" }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "400": { "description": "Erreur – Champs manquants / URL invalide" },
-          "500": { "description": "Erreur serveur" }
-        }
-      }
-    },
-    "/upload-and-send-email": {
-      "post": {
-        "operationId": "uploadAndSendEmail",
-        "summary": "Uploader une image PUIS envoyer l'email",
-        "description": "Étape combinée: upload de l'image puis envoi immédiat par email en inline (CID)",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "multipart/form-data": {
-              "schema": {
-                "type": "object",
-                "required": ["image", "to", "subject", "message"],
-                "properties": {
-                  "image": { "type": "string", "format": "binary" },
-                  "to": { "type": "string", "format": "email" },
-                  "subject": { "type": "string" },
-                  "message": { "type": "string" }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Upload + envoi réussis",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "success": { "type": "boolean" },
-                    "message": { "type": "string" },
-                    "data": {
-                      "type": "object",
-                      "properties": {
-                        "messageId": { "type": "string" },
-                        "filename": { "type": "string" },
-                        "publicUrl": { "type": "string" },
-                        "imageSize": { "type": "integer" },
-                        "recipient": { "type": "string", "format": "email" },
-                        "timestamp": { "type": "string", "format": "date-time" }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "400": { "description": "Erreur – Champs manquants / fichier invalide" },
-          "500": { "description": "Erreur serveur" }
-        }
-      }
-    },
-    "/list-images": {
-      "get": {
-        "operationId": "listImages",
-        "summary": "Lister les images hébergées",
-        "description": "Retourne toutes les images actuellement hébergées",
-        "responses": {
-          "200": {
-            "description": "Liste des images",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "success": { "type": "boolean" },
-                    "count": { "type": "integer" },
-                    "serverUrl": { "type": "string" },
-                    "images": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "filename": { "type": "string" },
-                          "url": { "type": "string" },
-                          "path": { "type": "string" }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "500": { "description": "Erreur serveur" }
-        }
-      }
-    }
-  }
-}
-```
-
----
-
-## Variables d’environnement recommandées (`.env`)
-
-```env
-PORT=3000
-PUBLIC_SERVER_URL=https://pdf-api.azurewebsites.net
-# SMTP Office 365 (recommandé)
-SMTP_HOST=smtp.office365.com
-SMTP_PORT=587
-SMTP_SECURE=false
-SMTP_USER=administration.STS@avocarbon.com
-SMTP_PASS=********
-EMAIL_FROM_NAME=Administration STS
-EMAIL_FROM=administration.STS@avocarbon.com
-```
-
-## Notes clés
-
-* 🔒 **Sécurité** : `/send-email-with-image` accepte uniquement des URLs d’images **hébergées par votre propre serveur** (même domaine) pour éviter l’SSRF.
-* ✉️ **Office 365** : l’authentification **SMTP AUTH (587/STARTTLS)** est configurée via variables d’environnement. Si vous utilisez un *SMTP relay connector* sur port 25, laissez `SMTP_USER`/`SMTP_PASS` vides (si autorisé par votre infra).
-* 🧹 **Nettoyage** : les fichiers temporaires sont supprimés après envoi.
-* 🧾 **OpenAPI** : ajoute l’endpoint combiné et précise les réponses, formats et contraintes.
