@@ -1,5 +1,6 @@
 /**
  * server.js — API Email (image en BASE64 -> email inline CID + pièce jointe)
+ *
  * Endpoints:
  *  - GET  /health
  *  - POST /send-email-base64
@@ -120,7 +121,7 @@ app.get("/health", async (req, res) => {
   });
 });
 
-// Send email from base64
+// Envoi d'email depuis un base64
 app.post("/send-email-base64", async (req, res) => {
   try {
     const { to, subject, message, imageBase64, imageName } = req.body || {};
@@ -136,7 +137,7 @@ app.post("/send-email-base64", async (req, res) => {
       return res.status(400).json({ success: false, error: "Format d'email invalide pour 'to'." });
     }
 
-    // Décodage
+    // Décodage base64 (Data URL accepté)
     const raw = stripDataUrlPrefix(imageBase64);
     let buffer;
     try {
@@ -164,7 +165,7 @@ app.post("/send-email-base64", async (req, res) => {
       return res.status(400).json({ success: false, error: "Extension d'image non autorisée (PNG/JPG/JPEG/GIF/WebP)." });
     }
 
-    // HTML (préserve les retours ligne)
+    // Corps HTML (préserve \n)
     const html = `
       <div style="font-family: Arial, sans-serif; padding: 16px;">
         <h2 style="color:#333;">${escapeHtml(subject)}</h2>
