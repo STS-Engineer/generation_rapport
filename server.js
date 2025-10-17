@@ -1,9 +1,7 @@
 const express = require('express');
 const nodemailer = require('nodemailer');
-const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const axios = require('axios');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,7 +11,6 @@ const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
 const SMTP_PORT = 25;
 const EMAIL_FROM_NAME = "Administration STS";
 const EMAIL_FROM = "administration.STS@avocarbon.com";
-const AZURE_URL = process.env.AZURE_URL || "https://pdf-api.azurewebsites.net";
 
 // Créer le dossier images s'il n'existe pas
 const imagesDir = path.join(__dirname, 'images');
@@ -26,28 +23,6 @@ if (!fs.existsSync(imagesDir)) {
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use('/images', express.static(imagesDir));
-
-// Configuration Multer pour upload en mémoire
-const storage = multer.memoryStorage();
-
-const upload = multer({
-  storage: storage,
-  limits: { fileSize: 50 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|gif|webp|bmp/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
-    
-    console.log('🔍 FileFilter - Fichier:', file.originalname, 'MIME:', file.mimetype);
-    
-    if (mimetype && extname) {
-      return cb(null, true);
-    } else {
-      console.log('❌ Fichier rejeté:', file.originalname);
-      cb(new Error('Seules les images (JPG, PNG, GIF, WebP, BMP) sont autorisées'));
-    }
-  }
-});
 
 // Configuration du transporteur SMTP
 const transporter = nodemailer.createTransport({
@@ -62,35 +37,109 @@ const transporter = nodemailer.createTransport({
 // Route de test
 app.get('/', (req, res) => {
   res.json({
-    message: '✅ API Email avec Image - Serveur actif',
-    version: '3.1.0',
-    method: 'Upload fichier depuis GPT ou Utilisateur',
-    endpoints: {
-      sendEmail: 'POST /send-email (Image en multipart/form-data)',
-      sendEmailFromUrl: 'POST /send-email-from-url (Image depuis URL)',
-      listImages: 'GET /images',
-      getImage: 'GET /images/:filename'
+    message: '✅ API Email avec Image Base64 - Serveur actif',
+    version: '4.0.0',
+    method: 'Base64 Encoding/Decoding',
+    endpoint: 'POST /send-email',
+    parameters: {
+      to: 'email du destinataire (string)',
+      subject: 'sujet de l\'email (string)',
+      message: 'contenu du message (string)',
+      image: 'image en base64 (string)',
+      imageName: 'nom du fichier avec extension ex: photo.jpg (string)'
     },
     status: 'Running'
   });
 });
 
-// ========== FONCTION UTILITAIRE: Sauvegarder image et envoyer mail ==========
-async function saveAndSendEmail(imageBuffer, imageOriginalName, to, subject, message) {
+// ========== ROUTE UNIQUE: Envoyer email avec image Base64 ==========
+app.post('/send-email', async (req, res) => {
   try {
-    // 1️⃣ Générer un nom de fichier unique
+    const { to, subject, message, image, imageName } = req.body;
+
+    console.log('========================================');
+    console.log('📧 Nouvelle requête: /send-email');
+    console.log('Destinataire:', to);
+    console.log('Sujet:', subject);
+    console.log('Message:', message);
+    console.log('Image reçue:', image ? '✅ Oui' : '❌ Non');
+    console.log('Nom image:', imageName);
+    console.log('========================================');
+
+    // ========== VALIDATION DES CHAMPS ==========
+    if (!to) {
+      return res.status(400).json({
+        success: false,
+        error: 'Le champ "to" (email) est requis'
+      });
+    }
+
+    if (!subject) {
+      return res.status(400).json({
+        success: false,
+        error: 'Le champ "subject" est requis'
+      });
+    }
+
+    if (!message) {
+      return res.status(400).json({
+        success: false,
+        error: 'Le champ "message" est requis'
+      });
+    }
+
+    if (!image) {
+      return res.status(400).json({
+        success: false,
+        error: 'Le champ "image" (base64) est requis'
+      });
+    }
+
+    if (!imageName) {
+      return res.status(400).json({
+        success: false,
+        error: 'Le champ "imageName" est requis (ex: photo.jpg)'
+      });
+    }
+
+    // ========== DÉCODER L'IMAGE BASE64 ==========
+    let imageBuffer;
+    try {
+      // Supprimer le préfixe "data:image/..." s'il existe
+      let base64String = image;
+      if (image.includes(',')) {
+        base64String = image.split(',')[1];
+      }
+      
+      imageBuffer = Buffer.from(base64String, 'base64');
+      console.log(`✅ Image décodée: ${imageBuffer.length} octets`);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        error: 'Erreur lors du décodage de l\'image base64',
+        details: error.message
+      });
+    }
+
+    // ========== SAUVEGARDER L'IMAGE ==========
     const timestamp = Date.now();
     const randomNum = Math.round(Math.random() * 1E9);
-    const extension = path.extname(imageOriginalName);
+    const extension = path.extname(imageName);
     const filename = `image_${timestamp}_${randomNum}${extension}`;
     const filepath = path.join(imagesDir, filename);
 
-    // 2️⃣ Sauvegarder l'image sur le serveur Azure
-    fs.writeFileSync(filepath, imageBuffer);
-    const imageSize = imageBuffer.length;
-    console.log(`💾 Image sauvegardée: ${filename} (${imageSize} octets)`);
+    try {
+      fs.writeFileSync(filepath, imageBuffer);
+      console.log(`💾 Image sauvegardée: ${filename}`);
+    } catch (error) {
+      return res.status(500).json({
+        success: false,
+        error: 'Erreur lors de la sauvegarde de l\'image',
+        details: error.message
+      });
+    }
 
-    // 3️⃣ Déterminer le type MIME
+    // ========== DÉTERMINER LE TYPE MIME ==========
     const ext = extension.toLowerCase();
     const mimeTypes = {
       '.png': 'image/png',
@@ -100,35 +149,35 @@ async function saveAndSendEmail(imageBuffer, imageOriginalName, to, subject, mes
       '.webp': 'image/webp',
       '.bmp': 'image/bmp'
     };
-    const mimeType = mimeTypes[ext] || 'image/png';
+    const mimeType = mimeTypes[ext] || 'image/jpeg';
 
-    // 4️⃣ Configuration de l'email avec l'image
+    // ========== PRÉPARER L'EMAIL ==========
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
       to: to,
       subject: subject,
       html: `
         <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 600px; margin: 0 auto; background-color: #f9f9f9;">
-          <div style="border-bottom: 3px solid #007bff; padding-bottom: 15px; margin-bottom: 20px; background-color: white; padding: 15px;">
+          <div style="border-bottom: 3px solid #007bff; padding-bottom: 15px; margin-bottom: 20px; background-color: white; padding: 15px; border-radius: 8px;">
             <h2 style="color: #333; margin: 0; font-size: 24px;">${subject}</h2>
           </div>
           
           <div style="background-color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
-            <p style="font-size: 15px; line-height: 1.8; color: #555; margin-bottom: 20px;">
+            <p style="font-size: 15px; line-height: 1.8; color: #555; margin: 0;">
               ${message}
             </p>
           </div>
 
           <div style="text-align: center; margin: 30px 0; background-color: white; padding: 20px; border-radius: 8px;">
             <p style="font-weight: bold; margin-bottom: 15px; color: #333; font-size: 14px;">
-              📎 Image jointe ci-dessous:
+              📎 Image jointe:
             </p>
             <div style="display: inline-block; border: 2px solid #007bff; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.15); max-width: 100%;">
               <img src="cid:imageContent@email" alt="Image" style="max-width: 500px; height: auto; display: block; width: 100%;">
             </div>
           </div>
 
-          <div style="border-top: 2px solid #eee; padding-top: 15px; margin-top: 30px; text-align: center; background-color: white; padding: 15px;">
+          <div style="border-top: 2px solid #eee; padding-top: 15px; margin-top: 30px; text-align: center; background-color: #f0f0f0; padding: 15px; border-radius: 8px;">
             <p style="font-size: 12px; color: #999; margin: 0;">
               📧 Email envoyé via API Administration STS<br>
               📁 Fichier: ${filename}
@@ -147,96 +196,34 @@ async function saveAndSendEmail(imageBuffer, imageOriginalName, to, subject, mes
       ]
     };
 
-    // 5️⃣ Envoyer l'email
+    // ========== ENVOYER L'EMAIL ==========
     console.log('📤 Envoi de l\'email...');
     const info = await transporter.sendMail(mailOptions);
 
     console.log('✅ Email envoyé avec succès!');
     console.log('Message ID:', info.messageId);
-
-    return {
-      success: true,
-      messageId: info.messageId,
-      image: {
-        filename: filename,
-        size: imageSize,
-        type: mimeType,
-        url: `${AZURE_URL}/images/${filename}`
-      },
-      recipient: to,
-      timestamp: new Date().toISOString()
-    };
-
-  } catch (error) {
-    console.error('❌ Erreur:', error);
-    throw error;
-  }
-}
-
-// ========== ROUTE 1: Upload image directe (GPT ou formulaire) ==========
-app.post('/send-email', upload.single('image'), async (req, res) => {
-  try {
-    const { to, subject, message } = req.body;
-
-    console.log('========================================');
-    console.log('📧 Nouvelle requête: /send-email');
-    console.log('Body reçu:', req.body);
-    console.log('Fichier reçu:', req.file ? {
-      originalname: req.file.originalname,
-      size: req.file.size,
-      mimetype: req.file.mimetype,
-      encoding: req.file.encoding
-    } : 'AUCUN');
     console.log('========================================');
 
-    // Validation
-    if (!to) {
-      return res.status(400).json({
-        success: false,
-        error: 'Le champ "to" est requis'
-      });
-    }
-
-    if (!subject) {
-      return res.status(400).json({
-        success: false,
-        error: 'Le champ "subject" est requis'
-      });
-    }
-
-    if (!message) {
-      return res.status(400).json({
-        success: false,
-        error: 'Le champ "message" est requis'
-      });
-    }
-
-    if (!req.file) {
-      console.log('❌ ERREUR: Aucun fichier reçu');
-      return res.status(400).json({
-        success: false,
-        error: 'Aucun fichier image n\'a été uploadé',
-        hint: 'Assurez-vous que le fichier est envoyé avec le nom de champ "image"'
-      });
-    }
-
-    // Traiter l'image
-    const result = await saveAndSendEmail(
-      req.file.buffer,
-      req.file.originalname,
-      to,
-      subject,
-      message
-    );
-
+    // ========== RÉPONSE SUCCÈS ==========
     res.json({
       success: true,
       message: 'Email envoyé avec succès',
-      data: result
+      data: {
+        messageId: info.messageId,
+        recipient: to,
+        subject: subject,
+        image: {
+          filename: filename,
+          size: imageBuffer.length,
+          type: mimeType,
+          path: `/images/${filename}`
+        },
+        timestamp: new Date().toISOString()
+      }
     });
 
   } catch (error) {
-    console.error('❌ Erreur lors de l\'envoi:', error);
+    console.error('❌ Erreur générale:', error);
     res.status(500).json({
       success: false,
       error: 'Erreur lors de l\'envoi de l\'email',
@@ -245,72 +232,7 @@ app.post('/send-email', upload.single('image'), async (req, res) => {
   }
 });
 
-// ========== ROUTE 2: Envoyer image depuis URL (DALL-E, etc.) ==========
-app.post('/send-email-from-url', async (req, res) => {
-  try {
-    const { to, subject, message, imageUrl } = req.body;
-
-    console.log('========================================');
-    console.log('📧 Nouvelle requête: /send-email-from-url');
-    console.log('Destinataire:', to);
-    console.log('URL image:', imageUrl ? 'Reçue' : 'Manquante');
-    console.log('========================================');
-
-    // Validation
-    if (!to || !subject || !message || !imageUrl) {
-      return res.status(400).json({
-        success: false,
-        error: 'Les champs to, subject, message et imageUrl sont requis'
-      });
-    }
-
-    // 1️⃣ Télécharger l'image depuis l'URL
-    console.log('⬇️  Téléchargement de l\'image depuis:', imageUrl);
-    const response = await axios.get(imageUrl, {
-      responseType: 'arraybuffer',
-      timeout: 30000
-    });
-
-    const imageBuffer = Buffer.from(response.data);
-    const contentType = response.headers['content-type'];
-    
-    // Déterminer l'extension
-    let extension = '.png';
-    if (contentType.includes('jpeg')) extension = '.jpg';
-    else if (contentType.includes('png')) extension = '.png';
-    else if (contentType.includes('gif')) extension = '.gif';
-    else if (contentType.includes('webp')) extension = '.webp';
-
-    const imageName = `image_dalle${extension}`;
-
-    console.log(`✅ Image téléchargée (${imageBuffer.length} octets)`);
-
-    // 2️⃣ Sauvegarder et envoyer
-    const result = await saveAndSendEmail(
-      imageBuffer,
-      imageName,
-      to,
-      subject,
-      message
-    );
-
-    res.json({
-      success: true,
-      message: 'Email avec image DALL-E envoyé avec succès',
-      data: result
-    });
-
-  } catch (error) {
-    console.error('❌ Erreur:', error.message);
-    res.status(500).json({
-      success: false,
-      error: 'Erreur lors de l\'envoi',
-      details: error.message
-    });
-  }
-});
-
-// ========== ROUTE 3: Lister les images ==========
+// ========== ROUTE: Lister les images ==========
 app.get('/images-list', (req, res) => {
   try {
     const files = fs.readdirSync(imagesDir);
@@ -326,8 +248,7 @@ app.get('/images-list', (req, res) => {
         name: file,
         size: stats.size,
         sizeKB: (stats.size / 1024).toFixed(2),
-        created: stats.birthtime,
-        url: `${AZURE_URL}/images/${file}`
+        created: stats.birthtime
       };
     });
 
@@ -349,29 +270,12 @@ app.get('/images-list', (req, res) => {
   }
 });
 
-// Gestion des erreurs multer
+// Gestion des erreurs globales
 app.use((error, req, res, next) => {
-  console.error('🚨 Erreur middleware:', error.message);
-  
-  if (error instanceof multer.MulterError) {
-    console.log('Multer Error Code:', error.code);
-    if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({
-        success: false,
-        error: 'Fichier trop volumineux (max 50MB)'
-      });
-    }
-    if (error.code === 'LIMIT_PART_COUNT') {
-      return res.status(400).json({
-        success: false,
-        error: 'Trop de parties dans la requête'
-      });
-    }
-  }
-  
+  console.error('🚨 Erreur:', error);
   res.status(500).json({
     success: false,
-    error: error.message || 'Erreur serveur'
+    error: error.message
   });
 });
 
@@ -383,9 +287,7 @@ app.listen(PORT, () => {
   console.log(`📧 SMTP: ${SMTP_HOST}:${SMTP_PORT}`);
   console.log(`📁 Dossier images: ${imagesDir}`);
   console.log(`✉️  Email FROM: ${EMAIL_FROM}`);
-  console.log('🔗 Endpoints:');
-  console.log('   POST /send-email (upload direct)');
-  console.log('   POST /send-email-from-url (depuis URL)');
-  console.log('   GET /images-list (liste)');
+  console.log('🔗 Endpoint: POST /send-email');
+  console.log('📝 Paramètres: to, subject, message, image (base64), imageName');
   console.log('========================================');
 });
