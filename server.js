@@ -19,10 +19,27 @@ if (!fs.existsSync(imagesDir)) {
   console.log('✅ Dossier images créé');
 }
 
-// Middleware
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Middleware - Augmenter les limites pour base64
+app.use(express.json({ 
+  limit: '100mb',
+  strict: false,
+  type: ['application/json', 'text/plain']
+}));
+app.use(express.urlencoded({ 
+  extended: true, 
+  limit: '100mb',
+  parameterLimit: 100000
+}));
 app.use('/images', express.static(imagesDir));
+
+// Middleware personnalisé pour logs de taille
+app.use((req, res, next) => {
+  if (req.method === 'POST' && req.path === '/send-email') {
+    const contentLength = req.headers['content-length'];
+    console.log(`📥 Requête reçue: ${contentLength} bytes`);
+  }
+  next();
+});
 
 // Configuration du transporteur SMTP
 const transporter = nodemailer.createTransport({
@@ -68,8 +85,10 @@ app.post('/send-email', async (req, res) => {
     console.log('Destinataire:', to);
     console.log('Sujet:', subject);
     console.log('Message:', message);
-    console.log('Image reçue:', image ? '✅ Oui' : '❌ Non');
-    console.log('Nom image:', imageName);
+    console.log('ImageName:', imageName);
+    console.log('Base64 reçu - Longueur:', image ? image.length : 0, 'caractères');
+    console.log('Base64 reçu - Début:', image ? image.substring(0, 50) : 'NONE');
+    console.log('Base64 reçu - Fin:', image ? image.substring(Math.max(0, image.length - 50)) : 'NONE');
     console.log('========================================');
 
     // ========== VALIDATION DES CHAMPS ==========
