@@ -1,5 +1,6 @@
 const express = require('express');
 const nodemailer = require('nodemailer');
+const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
@@ -19,26 +20,27 @@ if (!fs.existsSync(imagesDir)) {
   console.log('✅ Dossier images créé');
 }
 
-// Middleware - Augmenter les limites pour base64
-app.use(express.json({ 
-  limit: '100mb',
-  strict: false,
-  type: ['application/json', 'text/plain']
-}));
-app.use(express.urlencoded({ 
-  extended: true, 
-  limit: '100mb',
-  parameterLimit: 100000
-}));
+// Middleware
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb', parameterLimit: 100000 }));
 app.use('/images', express.static(imagesDir));
 
-// Middleware personnalisé pour logs de taille
-app.use((req, res, next) => {
-  if (req.method === 'POST' && req.path === '/send-email') {
-    const contentLength = req.headers['content-length'];
-    console.log(`📥 Requête reçue: ${contentLength} bytes`);
+// Configuration Multer pour upload en mémoire
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 100 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|webp|bmp/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Seules les images sont autorisées'));
+    }
   }
-  next();
 });
 
 // Configuration du transporteur SMTP
@@ -46,52 +48,151 @@ const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
   secure: false,
-  auth: false,
   tls: {
-    rejectUnauthorized: false,
-    minVersion: 'TLSv1.2'
-  },
-  connectionTimeout: 5000,
-  socketTimeout: 5000,
-  logger: true,
-  debug: true
+    rejectUnauthorized: false
+  }
 });
 
 // Route de test
 app.get('/', (req, res) => {
   res.json({
-    message: '✅ API Email avec Image Base64 - Serveur actif',
-    version: '4.0.0',
-    method: 'Base64 Encoding/Decoding',
+    message: '✅ API Email avec Image - Serveur actif',
+    version: '5.0.0',
+    method: 'Multipart Upload (Direct File)',
     endpoint: 'POST /send-email',
     parameters: {
-      to: 'email du destinataire (string)',
-      subject: 'sujet de l\'email (string)',
-      message: 'contenu du message (string)',
-      image: 'image en base64 (string)',
-      imageName: 'nom du fichier avec extension ex: photo.jpg (string)'
+      to: 'email du destinataire',
+      subject: 'sujet',
+      message: 'message',
+      image: 'fichier image (multipart)'
     },
     status: 'Running'
   });
 });
 
-// ========== ROUTE UNIQUE: Envoyer email avec image Base64 ==========
-app.post('/send-email', async (req, res) => {
+// ========== FONCTION: Sauvegarder et envoyer email ==========
+async function saveAndSendEmail(imageBuffer, imageName, to, subject, message) {
   try {
-    const { to, subject, message, image, imageName } = req.body;
+    // Générer un nom de fichier unique
+    const timestamp = Date.now();
+    const randomNum = Math.round(Math.random() * 1E9);
+    const extension = path.extname(imageName);
+    const filename = `image_${timestamp}_${randomNum}${extension}`;
+    const filepath = path.join(imagesDir, filename);
+
+    // Sauvegarder l'image
+    fs.writeFileSync(filepath, imageBuffer);
+    console.log(`💾 Image sauvegardée: ${filename} (${imageBuffer.length} octets)`);
+
+    // Déterminer le type MIME
+    const ext = extension.toLowerCase();
+    const mimeTypes = {
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.bmp': 'image/bmp'
+    };
+    const mimeType = mimeTypes[ext] || 'image/jpeg';
+
+    // Convertir l'image en base64 pour l'intégrer directement dans le HTML
+    const imageBase64 = imageBuffer.toString('base64');
+
+    // Préparer l'email
+    const mailOptions = {
+      from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
+      to: to,
+      subject: subject,
+      html: `
+        <html>
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          </head>
+          <body style="font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f9f9f9;">
+            <div style="padding: 20px; max-width: 600px; margin: 0 auto;">
+              
+              <!-- Header -->
+              <div style="border-bottom: 3px solid #007bff; padding: 15px; margin-bottom: 20px; background-color: white; border-radius: 8px;">
+                <h2 style="color: #333; margin: 0; font-size: 24px;">${subject}</h2>
+              </div>
+              
+              <!-- Message -->
+              <div style="background-color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                <p style="font-size: 15px; line-height: 1.8; color: #555; margin: 0;">
+                  ${message}
+                </p>
+              </div>
+
+              <!-- Image Section - BASE64 DIRECT -->
+              <div style="text-align: center; margin: 30px 0; background-color: white; padding: 20px; border-radius: 8px;">
+                <p style="font-weight: bold; margin-bottom: 15px; color: #333; font-size: 14px;">
+                  📎 Image:
+                </p>
+                <div style="display: inline-block; border: 2px solid #007bff; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.15); max-width: 100%;">
+                  <img src="data:${mimeType};base64,${imageBase64}" 
+                       alt="Image" 
+                       style="max-width: 500px; height: auto; display: block; width: 100%; border: none;">
+                </div>
+              </div>
+
+              <!-- Footer -->
+              <div style="border-top: 2px solid #eee; padding-top: 15px; margin-top: 30px; text-align: center; background-color: white; padding: 15px; border-radius: 8px;">
+                <p style="font-size: 12px; color: #999; margin: 0;">
+                  📧 Email envoyé via API Administration STS<br>
+                  📁 Fichier: ${filename}<br>
+                  ⏰ ${new Date().toLocaleString('fr-FR')}
+                </p>
+              </div>
+              
+            </div>
+          </body>
+        </html>
+      `
+    };
+
+    // Envoyer l'email
+    console.log('📤 Envoi de l\'email...');
+    const info = await transporter.sendMail(mailOptions);
+
+    console.log('✅ Email envoyé avec succès!');
+    console.log('Message ID:', info.messageId);
+
+    return {
+      success: true,
+      messageId: info.messageId,
+      image: {
+        filename: filename,
+        size: imageBuffer.length,
+        type: mimeType,
+        path: `/images/${filename}`
+      },
+      recipient: to,
+      timestamp: new Date().toISOString()
+    };
+
+  } catch (error) {
+    console.error('❌ Erreur:', error);
+    throw error;
+  }
+}
+
+// ========== ROUTE: Upload image directe (multipart/form-data) ==========
+app.post('/send-email', upload.single('image'), async (req, res) => {
+  try {
+    const { to, subject, message } = req.body;
 
     console.log('========================================');
     console.log('📧 Nouvelle requête: /send-email');
     console.log('Destinataire:', to);
     console.log('Sujet:', subject);
     console.log('Message:', message);
-    console.log('ImageName:', imageName);
-    console.log('Base64 reçu - Longueur:', image ? image.length : 0, 'caractères');
-    console.log('Base64 reçu - Début:', image ? image.substring(0, 50) : 'NONE');
-    console.log('Base64 reçu - Fin:', image ? image.substring(Math.max(0, image.length - 50)) : 'NONE');
+    console.log('Fichier reçu:', req.file ? req.file.originalname : 'AUCUN');
+    console.log('Taille fichier:', req.file ? req.file.size : 0, 'bytes');
     console.log('========================================');
 
-    // ========== VALIDATION DES CHAMPS ==========
+    // Validation
     if (!to) {
       return res.status(400).json({
         success: false,
@@ -113,157 +214,30 @@ app.post('/send-email', async (req, res) => {
       });
     }
 
-    if (!image) {
+    if (!req.file) {
       return res.status(400).json({
         success: false,
-        error: 'Le champ "image" (base64) est requis'
+        error: 'Aucun fichier image n\'a été uploadé. Utilisez le champ "image" en multipart/form-data'
       });
     }
 
-    if (!imageName) {
-      return res.status(400).json({
-        success: false,
-        error: 'Le champ "imageName" est requis (ex: photo.jpg)'
-      });
-    }
+    // Traiter l'image
+    const result = await saveAndSendEmail(
+      req.file.buffer,
+      req.file.originalname,
+      to,
+      subject,
+      message
+    );
 
-    // ========== DÉCODER L'IMAGE BASE64 ==========
-    let imageBuffer;
-    try {
-      // Supprimer le préfixe "data:image/..." s'il existe
-      let base64String = image;
-      if (image.includes(',')) {
-        base64String = image.split(',')[1];
-      }
-      
-      imageBuffer = Buffer.from(base64String, 'base64');
-      console.log(`✅ Image décodée: ${imageBuffer.length} octets`);
-    } catch (error) {
-      return res.status(400).json({
-        success: false,
-        error: 'Erreur lors du décodage de l\'image base64',
-        details: error.message
-      });
-    }
-
-    // ========== SAUVEGARDER L'IMAGE ==========
-    const timestamp = Date.now();
-    const randomNum = Math.round(Math.random() * 1E9);
-    const extension = path.extname(imageName);
-    const filename = `image_${timestamp}_${randomNum}${extension}`;
-    const filepath = path.join(imagesDir, filename);
-
-    try {
-      fs.writeFileSync(filepath, imageBuffer);
-      console.log(`💾 Image sauvegardée: ${filename}`);
-    } catch (error) {
-      return res.status(500).json({
-        success: false,
-        error: 'Erreur lors de la sauvegarde de l\'image',
-        details: error.message
-      });
-    }
-
-    // ========== DÉTERMINER LE TYPE MIME ==========
-    const ext = extension.toLowerCase();
-    const mimeTypes = {
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.webp': 'image/webp',
-      '.bmp': 'image/bmp'
-    };
-    const mimeType = mimeTypes[ext] || 'image/jpeg';
-
-    // ========== PRÉPARER L'EMAIL ==========
-    const mailOptions = {
-      from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
-      to: to,
-      subject: subject,
-      html: `
-        <html>
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          </head>
-          <body style="font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f9f9f9;">
-            <div style="padding: 20px; max-width: 600px; margin: 0 auto;">
-              
-              <!-- Header -->
-              <div style="border-bottom: 3px solid #007bff; padding-bottom: 15px; margin-bottom: 20px; background-color: white; padding: 15px; border-radius: 8px;">
-                <h2 style="color: #333; margin: 0; font-size: 24px;">${subject}</h2>
-              </div>
-              
-              <!-- Message -->
-              <div style="background-color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
-                <p style="font-size: 15px; line-height: 1.8; color: #555; margin: 0;">
-                  ${message}
-                </p>
-              </div>
-
-              <!-- Image Section -->
-              <div style="text-align: center; margin: 30px 0; background-color: white; padding: 20px; border-radius: 8px;">
-                <p style="font-weight: bold; margin-bottom: 15px; color: #333; font-size: 14px;">
-                  📎 Image:
-                </p>
-                <div style="display: inline-block; border: 2px solid #007bff; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.15); max-width: 100%;">
-                  <img src="cid:imageContent@email" alt="Image" style="max-width: 500px; height: auto; display: block; width: 100%; border: none;">
-                </div>
-              </div>
-
-              <!-- Footer -->
-              <div style="border-top: 2px solid #eee; padding-top: 15px; margin-top: 30px; text-align: center; background-color: white; padding: 15px; border-radius: 8px;">
-                <p style="font-size: 12px; color: #999; margin: 0;">
-                  📧 Email envoyé via API Administration STS<br>
-                  📁 Fichier: ${filename}<br>
-                  ⏰ ${new Date().toLocaleString('fr-FR')}
-                </p>
-              </div>
-              
-            </div>
-          </body>
-        </html>
-      `,
-      attachments: [
-        {
-          filename: filename,
-          content: imageBuffer,
-          contentType: mimeType,
-          cid: 'imageContent@email',
-          contentDisposition: 'inline'
-        }
-      ]
-    };
-
-    // ========== ENVOYER L'EMAIL ==========
-    console.log('📤 Envoi de l\'email...');
-    const info = await transporter.sendMail(mailOptions);
-
-    console.log('✅ Email envoyé avec succès!');
-    console.log('Message ID:', info.messageId);
-    console.log('========================================');
-
-    // ========== RÉPONSE SUCCÈS ==========
     res.json({
       success: true,
       message: 'Email envoyé avec succès',
-      data: {
-        messageId: info.messageId,
-        recipient: to,
-        subject: subject,
-        image: {
-          filename: filename,
-          size: imageBuffer.length,
-          type: mimeType,
-          path: `/images/${filename}`
-        },
-        timestamp: new Date().toISOString()
-      }
+      data: result
     });
 
   } catch (error) {
-    console.error('❌ Erreur générale:', error);
+    console.error('❌ Erreur lors de l\'envoi:', error);
     res.status(500).json({
       success: false,
       error: 'Erreur lors de l\'envoi de l\'email',
@@ -310,9 +284,19 @@ app.get('/images-list', (req, res) => {
   }
 });
 
-// Gestion des erreurs globales
+// Gestion des erreurs multer
 app.use((error, req, res, next) => {
-  console.error('🚨 Erreur:', error);
+  console.error('🚨 Erreur:', error.message);
+  
+  if (error instanceof multer.MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({
+        success: false,
+        error: 'Fichier trop volumineux (max 100MB)'
+      });
+    }
+  }
+  
   res.status(500).json({
     success: false,
     error: error.message
@@ -328,6 +312,7 @@ app.listen(PORT, () => {
   console.log(`📁 Dossier images: ${imagesDir}`);
   console.log(`✉️  Email FROM: ${EMAIL_FROM}`);
   console.log('🔗 Endpoint: POST /send-email');
-  console.log('📝 Paramètres: to, subject, message, image (base64), imageName');
+  console.log('📝 Format: multipart/form-data');
+  console.log('🖼️ Image affichée: DIRECTEMENT dans le corps de l\'email');
   console.log('========================================');
 });
