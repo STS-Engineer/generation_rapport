@@ -29,9 +29,15 @@ const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
   secure: false,
+  auth: false,
   tls: {
-    rejectUnauthorized: false
-  }
+    rejectUnauthorized: false,
+    minVersion: 'TLSv1.2'
+  },
+  connectionTimeout: 5000,
+  socketTimeout: 5000,
+  logger: true,
+  debug: true
 });
 
 // Route de test
@@ -157,33 +163,48 @@ app.post('/send-email', async (req, res) => {
       to: to,
       subject: subject,
       html: `
-        <div style="font-family: Arial, sans-serif; padding: 20px; max-width: 600px; margin: 0 auto; background-color: #f9f9f9;">
-          <div style="border-bottom: 3px solid #007bff; padding-bottom: 15px; margin-bottom: 20px; background-color: white; padding: 15px; border-radius: 8px;">
-            <h2 style="color: #333; margin: 0; font-size: 24px;">${subject}</h2>
-          </div>
-          
-          <div style="background-color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
-            <p style="font-size: 15px; line-height: 1.8; color: #555; margin: 0;">
-              ${message}
-            </p>
-          </div>
+        <html>
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          </head>
+          <body style="font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f9f9f9;">
+            <div style="padding: 20px; max-width: 600px; margin: 0 auto;">
+              
+              <!-- Header -->
+              <div style="border-bottom: 3px solid #007bff; padding-bottom: 15px; margin-bottom: 20px; background-color: white; padding: 15px; border-radius: 8px;">
+                <h2 style="color: #333; margin: 0; font-size: 24px;">${subject}</h2>
+              </div>
+              
+              <!-- Message -->
+              <div style="background-color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+                <p style="font-size: 15px; line-height: 1.8; color: #555; margin: 0;">
+                  ${message}
+                </p>
+              </div>
 
-          <div style="text-align: center; margin: 30px 0; background-color: white; padding: 20px; border-radius: 8px;">
-            <p style="font-weight: bold; margin-bottom: 15px; color: #333; font-size: 14px;">
-              📎 Image jointe:
-            </p>
-            <div style="display: inline-block; border: 2px solid #007bff; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.15); max-width: 100%;">
-              <img src="cid:imageContent@email" alt="Image" style="max-width: 500px; height: auto; display: block; width: 100%;">
+              <!-- Image Section -->
+              <div style="text-align: center; margin: 30px 0; background-color: white; padding: 20px; border-radius: 8px;">
+                <p style="font-weight: bold; margin-bottom: 15px; color: #333; font-size: 14px;">
+                  📎 Image:
+                </p>
+                <div style="display: inline-block; border: 2px solid #007bff; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.15); max-width: 100%;">
+                  <img src="cid:imageContent@email" alt="Image" style="max-width: 500px; height: auto; display: block; width: 100%; border: none;">
+                </div>
+              </div>
+
+              <!-- Footer -->
+              <div style="border-top: 2px solid #eee; padding-top: 15px; margin-top: 30px; text-align: center; background-color: white; padding: 15px; border-radius: 8px;">
+                <p style="font-size: 12px; color: #999; margin: 0;">
+                  📧 Email envoyé via API Administration STS<br>
+                  📁 Fichier: ${filename}<br>
+                  ⏰ ${new Date().toLocaleString('fr-FR')}
+                </p>
+              </div>
+              
             </div>
-          </div>
-
-          <div style="border-top: 2px solid #eee; padding-top: 15px; margin-top: 30px; text-align: center; background-color: #f0f0f0; padding: 15px; border-radius: 8px;">
-            <p style="font-size: 12px; color: #999; margin: 0;">
-              📧 Email envoyé via API Administration STS<br>
-              📁 Fichier: ${filename}
-            </p>
-          </div>
-        </div>
+          </body>
+        </html>
       `,
       attachments: [
         {
