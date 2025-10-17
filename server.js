@@ -38,10 +38,13 @@ const upload = multer({
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = allowedTypes.test(file.mimetype);
     
+    console.log('🔍 FileFilter - Fichier:', file.originalname, 'MIME:', file.mimetype);
+    
     if (mimetype && extname) {
       return cb(null, true);
     } else {
-      cb(new Error('Seules les images sont autorisées'));
+      console.log('❌ Fichier rejeté:', file.originalname);
+      cb(new Error('Seules les images (JPG, PNG, GIF, WebP, BMP) sont autorisées'));
     }
   }
 });
@@ -177,9 +180,13 @@ app.post('/send-email', upload.single('image'), async (req, res) => {
 
     console.log('========================================');
     console.log('📧 Nouvelle requête: /send-email');
-    console.log('Destinataire:', to);
-    console.log('Sujet:', subject);
-    console.log('Fichier:', req.file ? req.file.originalname : 'Aucun');
+    console.log('Body reçu:', req.body);
+    console.log('Fichier reçu:', req.file ? {
+      originalname: req.file.originalname,
+      size: req.file.size,
+      mimetype: req.file.mimetype,
+      encoding: req.file.encoding
+    } : 'AUCUN');
     console.log('========================================');
 
     // Validation
@@ -205,9 +212,11 @@ app.post('/send-email', upload.single('image'), async (req, res) => {
     }
 
     if (!req.file) {
+      console.log('❌ ERREUR: Aucun fichier reçu');
       return res.status(400).json({
         success: false,
-        error: 'Aucun fichier image n\'a été uploadé'
+        error: 'Aucun fichier image n\'a été uploadé',
+        hint: 'Assurez-vous que le fichier est envoyé avec le nom de champ "image"'
       });
     }
 
@@ -342,17 +351,27 @@ app.get('/images-list', (req, res) => {
 
 // Gestion des erreurs multer
 app.use((error, req, res, next) => {
+  console.error('🚨 Erreur middleware:', error.message);
+  
   if (error instanceof multer.MulterError) {
+    console.log('Multer Error Code:', error.code);
     if (error.code === 'LIMIT_FILE_SIZE') {
       return res.status(400).json({
         success: false,
         error: 'Fichier trop volumineux (max 50MB)'
       });
     }
+    if (error.code === 'LIMIT_PART_COUNT') {
+      return res.status(400).json({
+        success: false,
+        error: 'Trop de parties dans la requête'
+      });
+    }
   }
+  
   res.status(500).json({
     success: false,
-    error: error.message
+    error: error.message || 'Erreur serveur'
   });
 });
 
