@@ -7,7 +7,7 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/* ========================= CONFIG FIXE ========================= */
+/* ========================= CONFIGURATION ========================= */
 const SMTP_HOST = "avocarbon-com.mail.protection.outlook.com";
 const SMTP_PORT = 25;
 const EMAIL_FROM_NAME = "Administration STS";
@@ -20,16 +20,16 @@ if (!fs.existsSync(imagesDir)) {
   console.log('✅ Dossier images créé');
 }
 
-// Middleware
+// ========================= MIDDLEWARE =========================
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb', parameterLimit: 100000 }));
 app.use('/images', express.static(imagesDir));
 
-// Configuration Multer pour upload en mémoire
+// ========================= MULTER CONFIGURATION =========================
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 100 * 1024 * 1024 },
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB max
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|gif|webp|bmp/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
@@ -38,12 +38,12 @@ const upload = multer({
     if (mimetype && extname) {
       return cb(null, true);
     } else {
-      cb(new Error('Seules les images sont autorisées'));
+      cb(new Error('Seules les images (JPG, PNG, GIF, WebP, BMP) sont autorisées'));
     }
   }
 });
 
-// Configuration du transporteur SMTP
+// ========================= SMTP CONFIGURATION =========================
 const transporter = nodemailer.createTransport({
   host: SMTP_HOST,
   port: SMTP_PORT,
@@ -53,7 +53,9 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// Route de test
+// ========================= ROUTES =========================
+
+// Route: Vérifier l'état du serveur
 app.get('/', (req, res) => {
   res.json({
     message: '✅ API Email avec Image - Serveur actif',
@@ -61,30 +63,30 @@ app.get('/', (req, res) => {
     method: 'Multipart Upload (Direct File)',
     endpoint: 'POST /send-email',
     parameters: {
-      to: 'email du destinataire',
-      subject: 'sujet',
-      message: 'message',
-      image: 'fichier image (multipart)'
+      to: 'majed.messai@avocarbon.com (FIXE)',
+      subject: 'mejed (FIXE)',
+      message: 'mejed123 (FIXE)',
+      image: 'fichier image uploadé (VARIABLE)'
     },
     status: 'Running'
   });
 });
 
-// ========== FONCTION: Sauvegarder et envoyer email ==========
+// ========================= FONCTION: Sauvegarder et envoyer email =========================
 async function saveAndSendEmail(imageBuffer, imageName, to, subject, message) {
   try {
-    // Générer un nom de fichier unique
+    // 1. Générer un nom de fichier unique
     const timestamp = Date.now();
     const randomNum = Math.round(Math.random() * 1E9);
     const extension = path.extname(imageName);
     const filename = `image_${timestamp}_${randomNum}${extension}`;
     const filepath = path.join(imagesDir, filename);
 
-    // Sauvegarder l'image
+    // 2. Sauvegarder l'image sur le serveur
     fs.writeFileSync(filepath, imageBuffer);
     console.log(`💾 Image sauvegardée: ${filename} (${imageBuffer.length} octets)`);
 
-    // Déterminer le type MIME
+    // 3. Déterminer le type MIME
     const ext = extension.toLowerCase();
     const mimeTypes = {
       '.png': 'image/png',
@@ -96,63 +98,64 @@ async function saveAndSendEmail(imageBuffer, imageName, to, subject, message) {
     };
     const mimeType = mimeTypes[ext] || 'image/jpeg';
 
-    // Convertir l'image en base64 pour l'intégrer directement dans le HTML
-    const imageBase64 = imageBuffer.toString('base64');
+    // 4. Préparer le contenu HTML de l'email
+    const htmlContent = `
+      <html>
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        </head>
+        <body style="font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f9f9f9;">
+          <div style="padding: 20px; max-width: 600px; margin: 0 auto;">
+            
+            <!-- Header avec titre -->
+            <div style="border-bottom: 3px solid #007bff; padding: 15px; margin-bottom: 20px; background-color: white; border-radius: 8px;">
+              <h2 style="color: #333; margin: 0; font-size: 24px;">${subject}</h2>
+            </div>
+            
+            <!-- Message principal -->
+            <div style="background-color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+              <p style="font-size: 15px; line-height: 1.8; color: #555; margin: 0;">
+                ${message}
+              </p>
+            </div>
 
-    // Préparer l'email
+            <!-- Information sur la pièce jointe -->
+            <div style="background-color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #ddd;">
+              <p style="font-size: 14px; color: #666; margin: 0;">
+                📎 <strong>Image jointe:</strong> ${filename}
+              </p>
+            </div>
+
+            <!-- Footer -->
+            <div style="border-top: 2px solid #eee; padding-top: 15px; margin-top: 30px; text-align: center; background-color: white; padding: 15px; border-radius: 8px;">
+              <p style="font-size: 12px; color: #999; margin: 0;">
+                📧 Email envoyé via API Administration STS<br>
+                ⏰ ${new Date().toLocaleString('fr-FR')}
+              </p>
+            </div>
+            
+          </div>
+        </body>
+      </html>
+    `;
+
+    // 5. Préparer l'email avec pièce jointe
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
       to: to,
       subject: subject,
-      html: `
-        <html>
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          </head>
-          <body style="font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f9f9f9;">
-            <div style="padding: 20px; max-width: 600px; margin: 0 auto;">
-              
-              <!-- Header -->
-              <div style="border-bottom: 3px solid #007bff; padding: 15px; margin-bottom: 20px; background-color: white; border-radius: 8px;">
-                <h2 style="color: #333; margin: 0; font-size: 24px;">${subject}</h2>
-              </div>
-              
-              <!-- Message -->
-              <div style="background-color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
-                <p style="font-size: 15px; line-height: 1.8; color: #555; margin: 0;">
-                  ${message}
-                </p>
-              </div>
-
-              <!-- Image Section - BASE64 DIRECT -->
-              <div style="text-align: center; margin: 30px 0; background-color: white; padding: 20px; border-radius: 8px;">
-                <p style="font-weight: bold; margin-bottom: 15px; color: #333; font-size: 14px;">
-                  📎 Image:
-                </p>
-                <div style="display: inline-block; border: 2px solid #007bff; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.15); max-width: 100%;">
-                  <img src="data:${mimeType};base64,${imageBase64}" 
-                       alt="Image" 
-                       style="max-width: 500px; height: auto; display: block; width: 100%; border: none;">
-                </div>
-              </div>
-
-              <!-- Footer -->
-              <div style="border-top: 2px solid #eee; padding-top: 15px; margin-top: 30px; text-align: center; background-color: white; padding: 15px; border-radius: 8px;">
-                <p style="font-size: 12px; color: #999; margin: 0;">
-                  📧 Email envoyé via API Administration STS<br>
-                  📁 Fichier: ${filename}<br>
-                  ⏰ ${new Date().toLocaleString('fr-FR')}
-                </p>
-              </div>
-              
-            </div>
-          </body>
-        </html>
-      `
+      html: htmlContent,
+      attachments: [
+        {
+          filename: filename,
+          content: imageBuffer,
+          contentType: mimeType
+        }
+      ]
     };
 
-    // Envoyer l'email
+    // 6. Envoyer l'email
     console.log('📤 Envoi de l\'email...');
     const info = await transporter.sendMail(mailOptions);
 
@@ -178,7 +181,7 @@ async function saveAndSendEmail(imageBuffer, imageName, to, subject, message) {
   }
 }
 
-// ========== ROUTE: Upload image directe (multipart/form-data) ==========
+// ========================= ROUTE: Envoyer email avec image =========================
 app.post('/send-email', upload.single('image'), async (req, res) => {
   try {
     const { to, subject, message } = req.body;
@@ -192,7 +195,7 @@ app.post('/send-email', upload.single('image'), async (req, res) => {
     console.log('Taille fichier:', req.file ? req.file.size : 0, 'bytes');
     console.log('========================================');
 
-    // Validation
+    // ========== VALIDATION ==========
     if (!to) {
       return res.status(400).json({
         success: false,
@@ -221,7 +224,7 @@ app.post('/send-email', upload.single('image'), async (req, res) => {
       });
     }
 
-    // Traiter l'image
+    // ========== TRAITER L'IMAGE ==========
     const result = await saveAndSendEmail(
       req.file.buffer,
       req.file.originalname,
@@ -230,6 +233,7 @@ app.post('/send-email', upload.single('image'), async (req, res) => {
       message
     );
 
+    // ========== RÉPONSE SUCCÈS ==========
     res.json({
       success: true,
       message: 'Email envoyé avec succès',
@@ -246,7 +250,7 @@ app.post('/send-email', upload.single('image'), async (req, res) => {
   }
 });
 
-// ========== ROUTE: Lister les images ==========
+// ========================= ROUTE: Lister les images =========================
 app.get('/images-list', (req, res) => {
   try {
     const files = fs.readdirSync(imagesDir);
@@ -284,7 +288,7 @@ app.get('/images-list', (req, res) => {
   }
 });
 
-// Gestion des erreurs multer
+// ========================= GESTION DES ERREURS =========================
 app.use((error, req, res, next) => {
   console.error('🚨 Erreur:', error.message);
   
@@ -299,11 +303,11 @@ app.use((error, req, res, next) => {
   
   res.status(500).json({
     success: false,
-    error: error.message
+    error: error.message || 'Erreur serveur'
   });
 });
 
-// Démarrer le serveur
+// ========================= DÉMARRER LE SERVEUR =========================
 app.listen(PORT, () => {
   console.log('========================================');
   console.log('🚀 Serveur démarré avec succès!');
@@ -313,6 +317,6 @@ app.listen(PORT, () => {
   console.log(`✉️  Email FROM: ${EMAIL_FROM}`);
   console.log('🔗 Endpoint: POST /send-email');
   console.log('📝 Format: multipart/form-data');
-  console.log('🖼️ Image affichée: DIRECTEMENT dans le corps de l\'email');
+  console.log('🖼️ Image: Pièce jointe avec aperçu dans Outlook');
   console.log('========================================');
 });
