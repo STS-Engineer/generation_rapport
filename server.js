@@ -1,6 +1,5 @@
 const express = require('express');
 const nodemailer = require('nodemailer');
-const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
@@ -21,27 +20,9 @@ if (!fs.existsSync(imagesDir)) {
 }
 
 // ========================= MIDDLEWARE =========================
-app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ extended: true, limit: '100mb', parameterLimit: 100000 }));
+app.use(express.json({ limit: '150mb' }));
+app.use(express.urlencoded({ extended: true, limit: '150mb', parameterLimit: 100000 }));
 app.use('/images', express.static(imagesDir));
-
-// ========================= MULTER CONFIGURATION =========================
-const storage = multer.memoryStorage();
-const upload = multer({
-  storage: storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB max
-  fileFilter: (req, file, cb) => {
-    const allowedTypes = /jpeg|jpg|png|gif|webp|bmp/;
-    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowedTypes.test(file.mimetype);
-    
-    if (mimetype && extname) {
-      return cb(null, true);
-    } else {
-      cb(new Error('Seules les images (JPG, PNG, GIF, WebP, BMP) sont autorisées'));
-    }
-  }
-});
 
 // ========================= SMTP CONFIGURATION =========================
 const transporter = nodemailer.createTransport({
@@ -58,35 +39,64 @@ const transporter = nodemailer.createTransport({
 // Route: Vérifier l'état du serveur
 app.get('/', (req, res) => {
   res.json({
-    message: '✅ API Email avec Image - Serveur actif',
-    version: '5.0.0',
-    method: 'Multipart Upload (Direct File)',
-    endpoint: 'POST /send-email',
+    message: '✅ API Email avec Base64 - Serveur actif',
+    version: '6.0.0',
+    method: 'Base64 Encoding/Decoding',
+    endpoint: 'POST /send-email-base64',
     parameters: {
-      to: 'majed.messai@avocarbon.com (FIXE)',
-      subject: 'mejed (FIXE)',
-      message: 'mejed123 (FIXE)',
-      image: 'fichier image uploadé (VARIABLE)'
+      to: 'majed.messai@avocarbon.com',
+      subject: 'mejed',
+      message: 'mejed123',
+      image: 'image encodée en base64 (complet)',
+      imageName: 'nom du fichier'
     },
     status: 'Running'
   });
 });
 
-// ========================= FONCTION: Sauvegarder et envoyer email =========================
-async function saveAndSendEmail(imageBuffer, imageName, to, subject, message) {
+// ========================= FONCTION: Décoder et envoyer email =========================
+async function decodeAndSendEmail(base64String, imageName, to, subject, message) {
   try {
-    // 1. Générer un nom de fichier unique
+    console.log('1️⃣ Début du décodage base64...');
+    
+    // 1. Nettoyer le base64 (supprimer le préfixe data: si présent)
+    let cleanBase64 = base64String;
+    if (base64String.includes(',')) {
+      cleanBase64 = base64String.split(',')[1];
+      console.log('   ℹ️  Préfixe data: supprimé');
+    }
+    
+    // 2. Décoder le base64 en binaire
+    let imageBuffer;
+    try {
+      imageBuffer = Buffer.from(cleanBase64, 'base64');
+      console.log(`   ✅ Base64 décodé: ${imageBuffer.length} octets`);
+    } catch (error) {
+      throw new Error(`Erreur lors du décodage base64: ${error.message}`);
+    }
+
+    // 3. Vérifier que le fichier n'est pas vide
+    if (imageBuffer.length === 0) {
+      throw new Error('L\'image décodée est vide (0 octets)');
+    }
+
+    // 4. Générer un nom de fichier unique
+    console.log('2️⃣ Génération du nom de fichier...');
     const timestamp = Date.now();
     const randomNum = Math.round(Math.random() * 1E9);
     const extension = path.extname(imageName);
     const filename = `image_${timestamp}_${randomNum}${extension}`;
     const filepath = path.join(imagesDir, filename);
+    console.log(`   ✅ Nom généré: ${filename}`);
 
-    // 2. Sauvegarder l'image sur le serveur
+    // 5. Sauvegarder l'image sur le serveur
+    console.log('3️⃣ Sauvegarde de l\'image...');
     fs.writeFileSync(filepath, imageBuffer);
-    console.log(`💾 Image sauvegardée: ${filename} (${imageBuffer.length} octets)`);
+    console.log(`   ✅ Image sauvegardée: ${filepath}`);
+    console.log(`   📊 Taille: ${imageBuffer.length} octets (${(imageBuffer.length / 1024).toFixed(2)} KB)`);
 
-    // 3. Déterminer le type MIME
+    // 6. Déterminer le type MIME
+    console.log('4️⃣ Détermination du type MIME...');
     const ext = extension.toLowerCase();
     const mimeTypes = {
       '.png': 'image/png',
@@ -97,8 +107,10 @@ async function saveAndSendEmail(imageBuffer, imageName, to, subject, message) {
       '.bmp': 'image/bmp'
     };
     const mimeType = mimeTypes[ext] || 'image/jpeg';
+    console.log(`   ✅ Type MIME: ${mimeType}`);
 
-    // 4. Préparer le contenu HTML de l'email
+    // 7. Préparer le contenu HTML de l'email
+    console.log('5️⃣ Préparation du template email...');
     const htmlContent = `
       <html>
         <head>
@@ -139,8 +151,10 @@ async function saveAndSendEmail(imageBuffer, imageName, to, subject, message) {
         </body>
       </html>
     `;
+    console.log('   ✅ Template prêt');
 
-    // 5. Préparer l'email avec pièce jointe
+    // 8. Préparer l'email avec pièce jointe
+    console.log('6️⃣ Préparation de l\'email...');
     const mailOptions = {
       from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
       to: to,
@@ -154,13 +168,13 @@ async function saveAndSendEmail(imageBuffer, imageName, to, subject, message) {
         }
       ]
     };
+    console.log('   ✅ Email préparé');
 
-    // 6. Envoyer l'email
-    console.log('📤 Envoi de l\'email...');
+    // 9. Envoyer l'email
+    console.log('7️⃣ Envoi de l\'email via SMTP...');
     const info = await transporter.sendMail(mailOptions);
-
-    console.log('✅ Email envoyé avec succès!');
-    console.log('Message ID:', info.messageId);
+    console.log(`   ✅ Email envoyé!`);
+    console.log(`   📧 Message ID: ${info.messageId}`);
 
     return {
       success: true,
@@ -176,27 +190,33 @@ async function saveAndSendEmail(imageBuffer, imageName, to, subject, message) {
     };
 
   } catch (error) {
-    console.error('❌ Erreur:', error);
+    console.error('❌ Erreur:', error.message);
     throw error;
   }
 }
 
-// ========================= ROUTE: Envoyer email avec image =========================
-app.post('/send-email', upload.single('image'), async (req, res) => {
+// ========================= ROUTE: Envoyer email avec base64 =========================
+app.post('/send-email-base64', async (req, res) => {
   try {
-    const { to, subject, message } = req.body;
+    const { to, subject, message, image, imageName } = req.body;
 
     console.log('========================================');
-    console.log('📧 Nouvelle requête: /send-email');
+    console.log('📧 NOUVELLE REQUÊTE: /send-email-base64');
+    console.log('========================================');
     console.log('Destinataire:', to);
     console.log('Sujet:', subject);
     console.log('Message:', message);
-    console.log('Fichier reçu:', req.file ? req.file.originalname : 'AUCUN');
-    console.log('Taille fichier:', req.file ? req.file.size : 0, 'bytes');
+    console.log('Nom fichier:', imageName);
+    console.log('Base64 reçu - Longueur:', image ? image.length : 0, 'caractères');
+    if (image) {
+      console.log('Base64 - Début:', image.substring(0, 50));
+      console.log('Base64 - Fin:', image.substring(Math.max(0, image.length - 50)));
+    }
     console.log('========================================');
 
     // ========== VALIDATION ==========
     if (!to) {
+      console.error('❌ Erreur: to manquant');
       return res.status(400).json({
         success: false,
         error: 'Le champ "to" (email) est requis'
@@ -204,6 +224,7 @@ app.post('/send-email', upload.single('image'), async (req, res) => {
     }
 
     if (!subject) {
+      console.error('❌ Erreur: subject manquant');
       return res.status(400).json({
         success: false,
         error: 'Le champ "subject" est requis'
@@ -211,29 +232,43 @@ app.post('/send-email', upload.single('image'), async (req, res) => {
     }
 
     if (!message) {
+      console.error('❌ Erreur: message manquant');
       return res.status(400).json({
         success: false,
         error: 'Le champ "message" est requis'
       });
     }
 
-    if (!req.file) {
+    if (!image) {
+      console.error('❌ Erreur: image (base64) manquante');
       return res.status(400).json({
         success: false,
-        error: 'Aucun fichier image n\'a été uploadé. Utilisez le champ "image" en multipart/form-data'
+        error: 'Le champ "image" (base64) est requis'
       });
     }
 
-    // ========== TRAITER L'IMAGE ==========
-    const result = await saveAndSendEmail(
-      req.file.buffer,
-      req.file.originalname,
+    if (!imageName) {
+      console.error('❌ Erreur: imageName manquant');
+      return res.status(400).json({
+        success: false,
+        error: 'Le champ "imageName" est requis (ex: photo.jpg)'
+      });
+    }
+
+    // ========== DÉCODER ET ENVOYER ==========
+    const result = await decodeAndSendEmail(
+      image,
+      imageName,
       to,
       subject,
       message
     );
 
     // ========== RÉPONSE SUCCÈS ==========
+    console.log('========================================');
+    console.log('✅ SUCCÈS TOTAL!');
+    console.log('========================================');
+    
     res.json({
       success: true,
       message: 'Email envoyé avec succès',
@@ -241,7 +276,12 @@ app.post('/send-email', upload.single('image'), async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Erreur lors de l\'envoi:', error);
+    console.error('========================================');
+    console.error('❌ ERREUR LORS DE L\'ENVOI');
+    console.error('========================================');
+    console.error('Détails:', error.message);
+    console.error('========================================');
+    
     res.status(500).json({
       success: false,
       error: 'Erreur lors de l\'envoi de l\'email',
@@ -266,6 +306,7 @@ app.get('/images-list', (req, res) => {
         name: file,
         size: stats.size,
         sizeKB: (stats.size / 1024).toFixed(2),
+        sizeMB: (stats.size / (1024 * 1024)).toFixed(2),
         created: stats.birthtime
       };
     });
@@ -276,6 +317,7 @@ app.get('/images-list', (req, res) => {
       success: true,
       count: images.length,
       totalSize: totalSize,
+      totalSizeKB: (totalSize / 1024).toFixed(2),
       totalSizeMB: (totalSize / (1024 * 1024)).toFixed(2),
       images: imageDetails
     });
@@ -290,16 +332,7 @@ app.get('/images-list', (req, res) => {
 
 // ========================= GESTION DES ERREURS =========================
 app.use((error, req, res, next) => {
-  console.error('🚨 Erreur:', error.message);
-  
-  if (error instanceof multer.MulterError) {
-    if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({
-        success: false,
-        error: 'Fichier trop volumineux (max 100MB)'
-      });
-    }
-  }
+  console.error('🚨 Erreur middleware:', error.message);
   
   res.status(500).json({
     success: false,
@@ -310,13 +343,26 @@ app.use((error, req, res, next) => {
 // ========================= DÉMARRER LE SERVEUR =========================
 app.listen(PORT, () => {
   console.log('========================================');
-  console.log('🚀 Serveur démarré avec succès!');
+  console.log('🚀 SERVEUR DÉMARRÉ AVEC SUCCÈS!');
+  console.log('========================================');
   console.log(`📍 Port: ${PORT}`);
   console.log(`📧 SMTP: ${SMTP_HOST}:${SMTP_PORT}`);
   console.log(`📁 Dossier images: ${imagesDir}`);
   console.log(`✉️  Email FROM: ${EMAIL_FROM}`);
-  console.log('🔗 Endpoint: POST /send-email');
-  console.log('📝 Format: multipart/form-data');
-  console.log('🖼️ Image: Pièce jointe avec aperçu dans Outlook');
+  console.log('');
+  console.log('🔗 ENDPOINTS:');
+  console.log('   1. GET  / - Vérifier l\'état');
+  console.log('   2. POST /send-email-base64 - Envoyer email');
+  console.log('   3. GET  /images-list - Lister les images');
+  console.log('');
+  console.log('📝 FORMAT:');
+  console.log('   Content-Type: application/json');
+  console.log('   Method: Base64 + Decode');
+  console.log('');
+  console.log('🖼️ IMAGE:');
+  console.log('   - Encodée en base64 par le GPT');
+  console.log('   - Décodée par le serveur');
+  console.log('   - Sauvegardée sur Azure');
+  console.log('   - Envoyée en pièce jointe');
   console.log('========================================');
 });
