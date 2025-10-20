@@ -16,17 +16,17 @@ const SMTP_HOST = process.env.SMTP_HOST || "avocarbon-com.mail.protection.outloo
 const SMTP_PORT = Number(process.env.SMTP_PORT || 25);
 const SMTP_USER = process.env.SMTP_USER || ""; // ex: administration.STS@avocarbon.com
 const SMTP_PASS = process.env.SMTP_PASS || "";
-const SMTP_SECURE = SMTP_PORT === 465; // true pour SSL implicite
+const SMTP_SECURE = SMTP_PORT === 465; // true pour SSL implicite (port 465)
 
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "Administration STS";
 const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
 
 // Limites & housekeeping
 const MAX_JSON_SIZE = "150mb";
-const MAX_CHUNK_CHARS = 50000;
+const MAX_CHUNK_CHARS = 50000;                 // borne API
 const MAX_FINAL_IMAGE_BYTES = 50 * 1024 * 1024; // 50 Mo
-const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min
-const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 min
+const SESSION_TTL_MS = 30 * 60 * 1000;         // 30 min
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;     // 5 min
 
 // Dossier images
 const imagesDir = path.join(__dirname, "images");
@@ -151,7 +151,7 @@ app.get("/", (req, res) => {
       message: "mejed123",
       image: "base64 complet (option A)",
       imageChunks: "chunk base64 ≤ 50000 chars (option B)",
-      imageName: "nom du fichier (ex: aa.jpg)",
+      imageName: "nom du fichier (ex: im.jpg)",
       chunkIndex: "0-based",
       totalChunks: "entier >= 1",
       uploadId: "(optionnel) identifiant stable de l’upload"
@@ -198,7 +198,7 @@ async function decodeAndSendEmail(base64String, imageName, to, subject, message)
         </div>
       </body>
     </html>
-  `;
+  ";
 
   const mailOptions = {
     from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
