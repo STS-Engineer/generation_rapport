@@ -10,24 +10,23 @@ const crypto = require("crypto");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/* ========================= CONFIGURATION ========================= */
-// Si tu as un relais interne (port 25 sans auth), garde ces valeurs.
-// Sinon, configure un compte O365 (port 587, STARTTLS) via variables d'env.
+/* ========================= CONFIG ========================= */
+// SMTP: utilisez de préférence smtp.office365.com:587 + AUTH
 const SMTP_HOST = process.env.SMTP_HOST || "avocarbon-com.mail.protection.outlook.com";
 const SMTP_PORT = Number(process.env.SMTP_PORT || 25);
-const SMTP_USER = process.env.SMTP_USER || "";
+const SMTP_USER = process.env.SMTP_USER || ""; // ex: administration.STS@avocarbon.com
 const SMTP_PASS = process.env.SMTP_PASS || "";
-const SMTP_SECURE = SMTP_PORT === 465; // vrai si SSL implicite
+const SMTP_SECURE = SMTP_PORT === 465; // true pour SSL implicite
 
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || "Administration STS";
 const EMAIL_FROM = process.env.EMAIL_FROM || "administration.STS@avocarbon.com";
 
-// Limites (défense basique)
+// Limites & housekeeping
 const MAX_JSON_SIZE = "150mb";
 const MAX_CHUNK_CHARS = 50000;
 const MAX_FINAL_IMAGE_BYTES = 50 * 1024 * 1024; // 50 Mo
-const SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
-const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 min
 
 // Dossier images
 const imagesDir = path.join(__dirname, "images");
@@ -44,24 +43,26 @@ app.use("/images", express.static(imagesDir));
 /* ========================= SMTP TRANSPORT ========================= */
 let transporter;
 if (SMTP_USER && SMTP_PASS) {
-  // Mode authentifié (recommandé pour O365: smtp.office365.com:587)
   transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port: SMTP_PORT,
     secure: SMTP_SECURE,
     auth: { user: SMTP_USER, pass: SMTP_PASS },
-    tls: { rejectUnauthorized: false }
+    tls: { rejectUnauthorized: false },
+    logger: true, // logs nodemailer
+    debug: true   // debug SMTP
   });
-  console.log("✉️  SMTP: mode AUTH activé");
+  console.log("✉️  SMTP: AUTH activé");
 } else {
-  // Mode relais sans auth (ton paramétrage actuel)
   transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port: SMTP_PORT,
     secure: false,
-    tls: { rejectUnauthorized: false }
+    tls: { rejectUnauthorized: false },
+    logger: true,
+    debug: true
   });
-  console.log("✉️  SMTP: mode RELAY (sans auth)");
+  console.log("✉️  SMTP: RELAY (sans auth)");
 }
 
 /* ========================= UTILS ========================= */
@@ -83,14 +84,12 @@ function isLikelyDataUrl(b64) {
 }
 
 function cleanBase64(b64) {
-  // Supprimer les sauts de ligne et l’en-tête data: si présent
-  let s = String(b64).replace(/\r?\n/g, "");
+  let s = String(b64 || "").replace(/\r?\n/g, "");
   if (isLikelyDataUrl(s)) s = s.split(",", 2)[1];
   return s;
 }
 
 function looksValidBase64(s) {
-  // Vérif rapide (pas infaillible) pour signaler les erreurs évidentes
   return /^[A-Za-z0-9+/=]*$/.test(s);
 }
 
@@ -100,12 +99,8 @@ function stableUploadId({ uploadId, to, imageName, totalChunks }) {
   return crypto.createHash("sha256").update(key).digest("hex").slice(0, 16);
 }
 
-/* ========================= SESSIONS CHUNKS ========================= */
+/* ========================= CHUNK SESSIONS ========================= */
 const sessions = Object.create(null);
-
-function getSession(id) {
-  return sessions[id];
-}
 
 function ensureSession(id, meta) {
   if (!sessions[id]) {
@@ -124,16 +119,14 @@ function dropSession(id) {
 }
 
 function allChunksPresent(session) {
-  // Compte strict des positions remplies (évite les “trous” dans le tableau sparse)
   const n = session.totalChunks;
-  let count = 0;
   for (let i = 0; i < n; i++) {
-    if (typeof session.chunks[i] === "string") count++;
+    if (typeof session.chunks[i] !== "string") return false;
   }
-  return count === n;
+  return true;
 }
 
-// Nettoyage périodique des sessions expirées/inactives
+// nettoyage périodique
 setInterval(() => {
   const now = Date.now();
   for (const [id, s] of Object.entries(sessions)) {
@@ -161,36 +154,30 @@ app.get("/", (req, res) => {
       imageName: "nom du fichier (ex: aa.jpg)",
       chunkIndex: "0-based",
       totalChunks: "entier >= 1",
-      uploadId: "(optionnel) identifiant stable de l’upload",
+      uploadId: "(optionnel) identifiant stable de l’upload"
     },
     status: "Running"
   });
 });
 
-/* ========================= FONCTION: décoder & envoyer ========================= */
+/* ============ CORE: décoder, sauver, et envoyer l'email ============ */
 async function decodeAndSendEmail(base64String, imageName, to, subject, message) {
-  // 1) Clean + validations simples
   const clean = cleanBase64(base64String);
   if (!clean) throw new Error("Base64 vide.");
   if (!looksValidBase64(clean)) throw new Error("Base64 invalide (caractères non autorisés).");
 
-  // 2) Décodage
   const imageBuffer = Buffer.from(clean, "base64");
-  if (!imageBuffer || imageBuffer.length === 0) {
-    throw new Error("Décodage base64 -> buffer vide.");
-  }
+  if (!imageBuffer || imageBuffer.length === 0) throw new Error("Décodage base64 -> buffer vide.");
   if (imageBuffer.length > MAX_FINAL_IMAGE_BYTES) {
     throw new Error(`Image trop volumineuse (${imageBuffer.length} bytes) > ${MAX_FINAL_IMAGE_BYTES} bytes`);
   }
 
-  // 3) Fichier
   const ext = path.extname(imageName || "").toLowerCase() || ".jpg";
   const mimeType = guessMime(ext);
   const filename = `image_${Date.now()}_${Math.round(Math.random() * 1e9)}${ext}`;
   const filepath = path.join(imagesDir, filename);
   fs.writeFileSync(filepath, imageBuffer);
 
-  // 4) HTML
   const htmlContent = `
     <html>
       <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
@@ -213,49 +200,46 @@ async function decodeAndSendEmail(base64String, imageName, to, subject, message)
     </html>
   `;
 
-  // 5) Mail
   const mailOptions = {
     from: `"${EMAIL_FROM_NAME}" <${EMAIL_FROM}>`,
-    to: to,
-    subject: subject,
+    to,
+    subject,
     html: htmlContent,
-    attachments: [
-      { filename, content: imageBuffer, contentType: mimeType }
-    ],
+    attachments: [{ filename, content: imageBuffer, contentType: mimeType }]
   };
 
   const info = await transporter.sendMail(mailOptions);
 
   return {
     success: true,
-    messageId: info.messageId,
-    image: {
-      filename,
-      size: imageBuffer.length,
-      type: mimeType,
-      path: `/images/${filename}`,
+    smtp: {
+      accepted: info.accepted,
+      rejected: info.rejected,
+      response: info.response,
+      envelope: info.envelope
     },
+    messageId: info.messageId,
+    image: { filename, size: imageBuffer.length, type: mimeType, path: `/images/${filename}` },
     recipient: to,
-    timestamp: new Date().toISOString(),
+    timestamp: new Date().toISOString()
   };
 }
 
-/* ========================= ROUTE: envoi base64 (single ou chunked) ========================= */
+/* ====== POST /send-email-base64 (single ou chunked) ====== */
 app.post("/send-email-base64", async (req, res) => {
   try {
     const {
       to,
       subject,
       message,
-      image,            // (option A) base64 complet
-      imageChunks,      // (option B) un chunk
+      image,            // option A: base64 complet
+      imageChunks,      // option B: un chunk
       imageName,
       chunkIndex,
       totalChunks,
-      uploadId          // (optionnel) identifiant stable côté client
+      uploadId          // optionnel: identifiant stable envoyé par le client
     } = req.body || {};
 
-    // Sanity checks communs
     if (!to || !subject || !message || !imageName) {
       return res.status(400).json({
         success: false,
@@ -263,16 +247,15 @@ app.post("/send-email-base64", async (req, res) => {
       });
     }
 
-    // === CAS A: base64 complet ===
+    // --- Single payload (pas de chunk) ---
     if (image && !imageChunks) {
       console.log("📦 Mode: Single (image complet)");
       const result = await decodeAndSendEmail(image, imageName, to, subject, message);
       return res.json({ success: true, message: "Email envoyé avec succès", data: result });
     }
 
-    // === CAS B: chunked ===
+    // --- Chunked payload ---
     if (typeof imageChunks === "string") {
-      // validations chunks
       if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
         return res.status(400).json({ success: false, error: "chunkIndex invalide (entier >= 0)" });
       }
@@ -289,30 +272,23 @@ app.post("/send-email-base64", async (req, res) => {
       const sid = stableUploadId({ uploadId, to, imageName, totalChunks });
       const session = ensureSession(sid, { to, subject, message, imageName, totalChunks });
 
-      // Cohérence inter-appels
       if (session.totalChunks !== totalChunks) {
         return res.status(400).json({ success: false, error: "Conflit: totalChunks incohérent avec la session" });
       }
 
-      // Stockage à l’index
       session.chunks[chunkIndex] = imageChunks;
       session.receivedCount = (session.receivedCount || 0) + 1;
-      session.createdAt = Date.now(); // “touch” pour éviter l’expiration active
+      session.createdAt = Date.now(); // touch
 
       console.log(`✅ Chunk ${chunkIndex + 1}/${totalChunks} reçu (sid=${sid})`);
 
-      // Vérifier si on a tout
       if (allChunksPresent(session)) {
         console.log("🔗 Tous les chunks présents — reconstruction…");
         const joined = session.chunks.join("");
 
-        // Sécurité: bornes complètes
         if (joined.length > MAX_CHUNK_CHARS * totalChunks) {
           dropSession(sid);
-          return res.status(400).json({
-            success: false,
-            error: "Base64 reconstitué trop volumineux"
-          });
+          return res.status(400).json({ success: false, error: "Base64 reconstitué trop volumineux" });
         }
 
         try {
@@ -338,7 +314,7 @@ app.post("/send-email-base64", async (req, res) => {
       });
     }
 
-    // Rien d’exploitable
+    // Aucun des deux formats
     return res.status(400).json({
       success: false,
       error: 'Envoyez soit "image" complet, soit "imageChunks" avec chunkIndex et totalChunks'
@@ -354,7 +330,7 @@ app.post("/send-email-base64", async (req, res) => {
   }
 });
 
-/* ========================= ROUTE: Lister les images ========================= */
+/* ========================= GET /images-list ========================= */
 app.get("/images-list", (req, res) => {
   try {
     const files = fs.readdirSync(imagesDir);
@@ -400,7 +376,7 @@ app.use((error, req, res, next) => {
   res.status(500).json({ success: false, error: error.message || "Erreur serveur" });
 });
 
-/* ========================= DÉMARRER ========================= */
+/* ========================= START ========================= */
 app.listen(PORT, () => {
   console.log("========================================");
   console.log("🚀 SERVEUR DÉMARRÉ AVEC SUCCÈS!");
@@ -411,8 +387,8 @@ app.listen(PORT, () => {
   console.log(`✉️  Email FROM: ${EMAIL_FROM}`);
   console.log("");
   console.log("🔗 ENDPOINTS:");
-  console.log("   1. GET  /             - Vérifier l'état");
-  console.log("   2. POST /send-email-base64 - Envoyer email (single ou chunked)");
-  console.log("   3. GET  /images-list  - Lister les images");
+  console.log("   1. GET  /                     - Vérifier l'état");
+  console.log("   2. POST /send-email-base64    - Envoyer email (single ou chunked)");
+  console.log("   3. GET  /images-list          - Lister les images");
   console.log("");
 });
